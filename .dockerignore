@@ -21,8 +21,8 @@ DEPLOY.md
 *.md
 
 # Local build output and editor noise.
-server
-server.exe
+/server
+/server.exe
 /bin
 /dist
 .vscode
