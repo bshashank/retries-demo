@@ -1,0 +1,208 @@
+package sim
+
+import (
+	"fmt"
+	"time"
+)
+
+// Simulation-wide tuning constants.
+const (
+	// nonEssentialTimeout bounds every non-essential dependency call. It is the
+	// single most important number in the model: it is what makes a non-essential
+	// failure cost the caller a *bounded* amount of occupancy instead of an
+	// unbounded one, which is why a non-essential outage cannot back up its parent.
+	nonEssentialTimeout = 300 * time.Millisecond
+
+	// runDeadline is the global deadline for one pipeline run.
+	runDeadline = 2 * time.Second
+
+	// metricsWindow is the rolling window all rates/percentiles are computed over.
+	metricsWindow = 5 * time.Second
+
+	// tickInterval is how often the engine recomputes statuses and republishes
+	// the cached snapshot.
+	tickInterval = 200 * time.Millisecond
+
+	// loadRatePerSec is the mean pipeline-run arrival rate at the orchestrator.
+	// Inter-arrival times are exponentially distributed around it.
+	loadRatePerSec = 20.0
+
+	// maxEvents bounds the event ring.
+	maxEvents = 100
+
+	// minAttempts is the smallest number of in-window attempts we are willing to
+	// draw a status conclusion from. Below it a node reports OK (insufficient data)
+	// rather than letting one unlucky sample paint the graph red.
+	minAttempts = 3
+)
+
+// nodeSpec is the static tuning for one simulated service: how long its own work
+// takes, how many workers it has, and how deep its queue is. Capacity is
+// workers/baseLatency requests per second; everything above that queues, and
+// everything above the queue is shed.
+type nodeSpec struct {
+	ID          string
+	Label       string
+	Tier        int
+	BaseLatency time.Duration
+	Workers     int
+	QueueCap    int
+}
+
+// edgeSpec is a static dependency declaration. Essential is the *default*
+// classification; it is runtime-toggleable via Controller.SetEdgeEssential.
+type edgeSpec struct {
+	From      string
+	To        string
+	Essential bool
+}
+
+// nodeSpecs returns the fixed 9-node topology tuning table.
+//
+// Sizing rationale at the nominal 20 runs/sec:
+//   - orchestrator occupancy is ~10ms + max(child latency) ~= 90ms, so ~2 of 32
+//     workers are busy. The deep worker pool is deliberate: it is the headroom
+//     that lets the orchestrator absorb a 300ms non-essential stall without its
+//     queue moving.
+//   - artifact-store is the shared leaf: it sees build's 20/s *plus* test's 20/s
+//     through one queue, so it is the node that tips first when slowed.
+//   - kafka-bus is deliberately thin (2 workers). At 20/s x 25ms it idles at
+//     rho=0.25, but the 5x kafka-lag injection pushes it past rho=1 so queue
+//     growth is actually observable rather than absorbed.
+func nodeSpecs() []nodeSpec {
+	return []nodeSpec{
+		{NodeOrchestrator, "Pipeline Orchestrator", 1, 10 * time.Millisecond, 32, 128},
+		{NodeBuild, "Build & Compile", 2, 30 * time.Millisecond, 16, 64},
+		{NodeTest, "Test Suite", 2, 40 * time.Millisecond, 16, 64},
+		{NodeSecurityScan, "Security Scan", 2, 20 * time.Millisecond, 12, 64},
+		{NodeTelemetry, "Telemetry Reporter", 2, 15 * time.Millisecond, 12, 64},
+		{NodeArtifactStore, "Artifact Store", 3, 25 * time.Millisecond, 8, 64},
+		{NodeRegistry, "Container Registry", 3, 30 * time.Millisecond, 8, 64},
+		{NodeSAST, "SAST Engine", 3, 60 * time.Millisecond, 6, 64},
+		{NodeKafka, "Kafka Event Bus", 3, 25 * time.Millisecond, 2, 64},
+	}
+}
+
+// edgeSpecs returns the fixed 9-edge dependency set with default classifications.
+func edgeSpecs() []edgeSpec {
+	return []edgeSpec{
+		{NodeOrchestrator, NodeBuild, true},
+		{NodeOrchestrator, NodeTest, true},
+		{NodeOrchestrator, NodeSecurityScan, false},
+		{NodeOrchestrator, NodeTelemetry, false},
+		{NodeBuild, NodeArtifactStore, true},
+		{NodeBuild, NodeRegistry, false},
+		{NodeTest, NodeArtifactStore, true},
+		{NodeSecurityScan, NodeSAST, true},
+		{NodeTelemetry, NodeKafka, true},
+	}
+}
+
+// validateTopology checks the structural invariants the rest of the engine and
+// the UI rely on: unique nodes, resolvable endpoints, no duplicate or self
+// edges, strictly increasing tiers along every edge, and acyclicity.
+func validateTopology(nodes []nodeSpec, edges []edgeSpec) error {
+	byID := make(map[string]nodeSpec, len(nodes))
+	for _, n := range nodes {
+		if _, dup := byID[n.ID]; dup {
+			return fmt.Errorf("sim: duplicate node id %q", n.ID)
+		}
+		if n.Workers <= 0 {
+			return fmt.Errorf("sim: node %q must have at least one worker", n.ID)
+		}
+		if n.QueueCap <= 0 {
+			return fmt.Errorf("sim: node %q must have a positive queue capacity", n.ID)
+		}
+		if n.Tier <= 0 {
+			return fmt.Errorf("sim: node %q must have a positive tier", n.ID)
+		}
+		byID[n.ID] = n
+	}
+
+	seen := make(map[[2]string]bool, len(edges))
+	for _, e := range edges {
+		from, ok := byID[e.From]
+		if !ok {
+			return fmt.Errorf("sim: edge %s->%s has unknown source", e.From, e.To)
+		}
+		to, ok := byID[e.To]
+		if !ok {
+			return fmt.Errorf("sim: edge %s->%s has unknown target", e.From, e.To)
+		}
+		if e.From == e.To {
+			return fmt.Errorf("sim: self edge on %q", e.From)
+		}
+		key := [2]string{e.From, e.To}
+		if seen[key] {
+			return fmt.Errorf("sim: duplicate edge %s->%s", e.From, e.To)
+		}
+		seen[key] = true
+		if to.Tier <= from.Tier {
+			return fmt.Errorf("sim: edge %s(tier %d)->%s(tier %d) does not descend a tier",
+				e.From, from.Tier, e.To, to.Tier)
+		}
+	}
+
+	if _, err := topoOrder(nodes, edges); err != nil {
+		return err
+	}
+	return nil
+}
+
+// topoOrder returns node IDs ordered parents-first: every node appears before
+// all of its dependencies. Reversing it gives leaves-first evaluation order.
+//
+// It doubles as the acyclicity check (Kahn's algorithm cannot drain a cycle)
+// and as the shutdown order: closing a parent's queue and draining its workers
+// before touching its children guarantees nothing can ever send on a closed
+// channel.
+func topoOrder(nodes []nodeSpec, edges []edgeSpec) ([]string, error) {
+	indeg := make(map[string]int, len(nodes))
+	adj := make(map[string][]string, len(nodes))
+	known := make(map[string]bool, len(nodes))
+	for _, n := range nodes {
+		indeg[n.ID] = 0
+		known[n.ID] = true
+	}
+	for _, e := range edges {
+		if !known[e.From] || !known[e.To] {
+			return nil, fmt.Errorf("sim: edge %s->%s references an unknown node", e.From, e.To)
+		}
+		adj[e.From] = append(adj[e.From], e.To)
+		indeg[e.To]++
+	}
+
+	// Seed in declaration order so the result is deterministic.
+	queue := make([]string, 0, len(nodes))
+	for _, n := range nodes {
+		if indeg[n.ID] == 0 {
+			queue = append(queue, n.ID)
+		}
+	}
+	out := make([]string, 0, len(nodes))
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		out = append(out, id)
+		for _, child := range adj[id] {
+			indeg[child]--
+			if indeg[child] == 0 {
+				queue = append(queue, child)
+			}
+		}
+	}
+	if len(out) != len(nodes) {
+		return nil, fmt.Errorf("sim: dependency graph contains a cycle (%d of %d nodes ordered)", len(out), len(nodes))
+	}
+	return out, nil
+}
+
+// reversed returns a copy of ids in reverse order (leaves-first from a
+// parents-first topological order).
+func reversed(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[len(ids)-1-i] = id
+	}
+	return out
+}

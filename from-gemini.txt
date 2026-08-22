@@ -1,0 +1,229 @@
+Option A gives you the ideal DAG structure: clear causal dependencies, strict core execution paths, and intuitive non-essential branch soft-fails.
+
+Here is the structured architecture summary and game plan to build this within your 1–2 hour window.
+
+---
+
+### System Architecture DAG
+
+```
+                      ┌─────────────────────────────┐
+                      │    Pipeline Orchestrator    │ (Tier 1: Gateway)
+                      └──────────────┬──────────────┘
+                                     │
+           ┌─────────────────────────┴─────────────────────────┐
+           ▼                                                   ▼
+┌──────────────────────┐                           ┌──────────────────────┐
+│ Compile & Unit Test  │ (Tier 2: Core)            │  Security & Linting  │ (Tier 2: Non-Core)
+└──────────┬───────────┘                           └──────────┬───────────┘
+           │                                                  │
+  ┌────────┴────────┐                                ┌────────┴────────┐
+  ▼                 ▼                                ▼                 ▼
+┌──────────────┐ ┌──────────────┐                 ┌──────────────┐ ┌──────────────┐
+│   Artifact   │ │    Image     │                 │ SAST Engine  │ │ Secret Scan  │ (Tier 3: Leaf)
+│    Store     │ │   Builder    │                 └──────────────┘ └──────────────┘
+└──────────────┘ └──────┬───────┘                  (Non-Core)       (Non-Core)
+ (Tier 3: Core)         │
+                        ▼
+                 ┌──────────────┐
+                 │   Registry   │                 (Tier 4: Non-Core)
+                 │    Mirror    │
+                 └──────────────┘
+
+```
+
+---
+
+### Failure Matrix & State Machine Logic
+
+| Scenario / Inject | Target Node | Gateway Action | System Health |
+| --- | --- | --- | --- |
+| **Nominal Operation** | All | Normal fan-out & DAG execution ($<200\text{ms}$) | **`GREEN`** |
+| **Non-Core Failure** | `SAST Engine` or `Secret Scan` | Circuit breaker trips / timeout $\rightarrow$ soft-fails with warning | **`DEGRADED`** |
+| **Leaf Registry Delay** | `Registry Mirror` ($10\times$ Latency) | `Image Builder` circuit breaks remote push; tags build as local draft | **`DEGRADED`** |
+| **Core Storage Failure** | `Artifact Store` | Core dependency unsatisfied $\rightarrow$ hard-halts downstream tasks | **`CRITICAL / DOWN`** |
+| **Core Compile Delay** | `Compile & Unit Test` | Global context deadline ($500\text{ms}$) expires $\rightarrow$ fast-aborts pipeline | **`CRITICAL / DOWN`** |
+
+---
+
+### Go Backend Architecture (`main.go`)
+
+Structure all downstream services in-memory as concurrent Go channels / structs with context cancellation:
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"time"
+)
+
+type PipelineStatus string
+
+const (
+	StatusGreen    PipelineStatus = "GREEN"
+	StatusDegraded PipelineStatus = "DEGRADED"
+	StatusDown     PipelineStatus = "CRITICAL / DOWN"
+)
+
+type NodeResult struct {
+	Name     string        `json:"name"`
+	Duration time.Duration `json:"duration_ms"`
+	Success  bool          `json:"success"`
+	Degraded bool          `json:"degraded"`
+	Error    string        `json:"error,omitempty"`
+}
+
+type Orchestrator struct {
+	// Configurable chaos parameters
+	LatencyMap map[string]time.Duration
+	ErrorMap   map[string]bool
+	mu         sync.RWMutex
+}
+
+func (o *Orchestrator) RunPipeline(ctx context.Context) (PipelineStatus, []NodeResult) {
+	ctx, cancel := context.WithTimeout(ctx, 600*time.Millisecond)
+	defer cancel()
+
+	var results []NodeResult
+	var resMu sync.Mutex
+	status := StatusGreen
+
+	// --- PHASE 1: PARALLEL TIER 2 EXECUTION ---
+	var wg sync.WaitGroup
+	coreFailed := false
+
+	// Branch 1: Core Compile
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		res := o.executeNode(ctx, "Compile & Unit Test")
+		
+		resMu.Lock()
+		results = append(results, res)
+		resMu.Unlock()
+
+		if !res.Success {
+			coreFailed = true
+			return
+		}
+
+		// --- PHASE 2: TIER 3 CORE DEPENDENT STEPS ---
+		var coreWg sync.WaitGroup
+		
+		// Artifact Store (Core)
+		coreWg.Add(1)
+		go func() {
+			defer coreWg.Done()
+			artRes := o.executeNode(ctx, "Artifact Store")
+			resMu.Lock()
+			results = append(results, artRes)
+			if !artRes.Success {
+				coreFailed = true
+			}
+			resMu.Unlock()
+		}()
+
+		// Image Builder & Registry Mirror (Non-Core Chain)
+		coreWg.Add(1)
+		go func() {
+			defer coreWg.Done()
+			imgRes := o.executeNode(ctx, "Image Builder")
+			resMu.Lock()
+			results = append(results, imgRes)
+			resMu.Unlock()
+
+			if imgRes.Success {
+				regRes := o.executeNode(ctx, "Registry Mirror")
+				resMu.Lock()
+				if !regRes.Success {
+					regRes.Degraded = true // Soft-fail downstream registry
+					status = StatusDegraded
+				}
+				results = append(results, regRes)
+				resMu.Unlock()
+			}
+		}()
+
+		coreWg.Wait()
+	}()
+
+	// Branch 2: Non-Core Security
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		secRes := o.executeNode(ctx, "Security & Linting")
+		
+		resMu.Lock()
+		if !secRes.Success {
+			secRes.Degraded = true // Soft-fail Tier 2 Non-Core
+			status = StatusDegraded
+		}
+		results = append(results, secRes)
+		resMu.Unlock()
+
+		if secRes.Success {
+			// Tier 3 Security Leaves
+			var secWg sync.WaitGroup
+			for _, leaf := range []string{"SAST Engine", "Secret Scan"} {
+				secWg.Add(1)
+				go func(node string) {
+					defer secWg.Done()
+					lRes := o.executeNode(ctx, node)
+					resMu.Lock()
+					if !lRes.Success {
+						lRes.Degraded = true // Soft-fail leaves
+						status = StatusDegraded
+					}
+					results = append(results, lRes)
+					resMu.Unlock()
+				}(leaf)
+			}
+			secWg.Wait()
+		}
+	}()
+
+	wg.Wait()
+
+	if coreFailed {
+		return StatusDown, results
+	}
+	return status, results
+}
+
+func (o *Orchestrator) executeNode(ctx context.Context, name string) NodeResult {
+	start := time.Now()
+	o.mu.RLock()
+	latency := o.LatencyMap[name]
+	shouldFail := o.ErrorMap[name]
+	o.mu.RUnlock()
+
+	select {
+	case <-time.After(latency):
+		if shouldFail {
+			return NodeResult{Name: name, Duration: time.Since(start), Success: false, Error: "Injected service failure"}
+		}
+		return NodeResult{Name: name, Duration: time.Since(start), Success: true}
+	case <-ctx.Done():
+		return NodeResult{Name: name, Duration: time.Since(start), Success: false, Error: "Context deadline exceeded"}
+	}
+}
+
+```
+
+---
+
+### Dashboard Layout Plan (TypeScript / React)
+
+1. **Top Status Header:** Prominent badge switching between **`GREEN`**, **`DEGRADED`**, and **`CRITICAL / DOWN`** with execution P99 latency.
+2. **DAG Topology Visualizer:** Graph cards linked by line connections.
+* **Node Status Color:** Green (Normal), Yellow (`DEGRADED` / Soft-failed), Red (`CRITICAL` Failure / Aborted).
+
+
+3. **Chaos Injection Panel:** Sliders to bump latency ($10\times$) or toggle error state on individual nodes.
+4. **"Run Scenario" Quick Presets:**
+* **Preset 1 (Nominal):** All nodes running at $50\text{ms}$.
+* **Preset 2 (Soft-Fail):** $10\times$ latency on `SAST Engine` & `Registry Mirror` $\rightarrow$ Demonstrates **`DEGRADED`** state under SLA.
+* **Preset 3 (Core Outage):** Error on `Artifact Store` $\rightarrow$ Demonstrates fast context cancellation and **`CRITICAL / DOWN`** state.
