@@ -1,0 +1,296 @@
+.controls {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  min-height: 0;
+}
+
+.controls__body {
+  overflow-y: auto;
+  padding: 12px 13px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.controls__reset {
+  padding: 3px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.controls__reset:hover:not(:disabled) {
+  background: var(--bg-inset);
+  color: var(--text);
+  border-color: var(--accent-dim);
+}
+
+.controls__error {
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--status-failing-edge);
+  background: var(--status-failing-bg);
+  color: #ffb3b0;
+  font-size: 11.5px;
+}
+
+.controls__note {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  padding: 6px 0;
+}
+
+.controls__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.controls__heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text);
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--border);
+}
+
+.controls__hint {
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  color: var(--text-dim);
+}
+
+/* ── Scenarios ───────────────────────────────────────────────────────────── */
+.controls__scenarios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.scenario {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  transition: border-color 140ms ease, background-color 140ms ease, transform 140ms ease;
+}
+
+.scenario:hover:not(:disabled) {
+  border-color: var(--accent-dim);
+  background: #1f293a;
+}
+
+.scenario:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.scenario__label {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.scenario__description {
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.scenario__expected {
+  display: flex;
+  gap: 6px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.scenario__expected-tag {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  padding-top: 2px;
+}
+
+/* ── Injection ───────────────────────────────────────────────────────────── */
+.controls__field {
+  display: block;
+}
+
+.controls__select {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+}
+
+.controls__multipliers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.multiplier {
+  padding: 6px 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 650;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-raised);
+  color: var(--text-muted);
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+
+.multiplier:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--status-degraded);
+}
+
+.multiplier[data-active="true"] {
+  color: #ffd479;
+  border-color: var(--status-degraded);
+  background: var(--status-degraded-bg);
+}
+
+.multiplier--recover {
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
+.multiplier--recover:hover:not(:disabled) {
+  border-color: var(--status-ok);
+  color: var(--status-ok);
+}
+
+.multiplier--recover[data-active="true"] {
+  color: var(--status-ok);
+  border-color: var(--status-ok-edge);
+  background: var(--status-ok-bg);
+}
+
+.controls__status {
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+/* ── Edge classification ─────────────────────────────────────────────────── */
+.controls__edges {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.edge-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-inset);
+}
+
+.edge-row[data-essential="true"] {
+  border-left-color: var(--accent);
+}
+
+.edge-row__names {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.edge-row__from,
+.edge-row__to {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.edge-row__from {
+  color: var(--text-dim);
+}
+
+.edge-row__to {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.edge-row__arrow {
+  color: var(--text-dim);
+  flex: none;
+}
+
+.edge-row__toggle {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.edge-row__toggle button {
+  padding: 2px 7px;
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+  border: 0;
+  background: var(--bg-raised);
+  color: var(--text-dim);
+  transition: background-color 140ms ease, color 140ms ease;
+}
+
+.edge-row__toggle button + button {
+  border-left: 1px solid var(--border-strong);
+}
+
+.edge-row__toggle button:hover:not(:disabled) {
+  color: var(--text);
+  background: #202a3b;
+}
+
+/* The active half is the current classification; it is deliberately disabled so
+   the control reads as state, not just as a pair of actions. */
+.edge-row__toggle button[data-active="true"]:disabled {
+  background: rgba(77, 159, 255, 0.16);
+  color: var(--accent);
+}
+
+.edge-row[data-essential="false"] .edge-row__toggle button[data-active="true"]:disabled {
+  background: rgba(147, 161, 184, 0.14);
+  color: var(--text-muted);
+}

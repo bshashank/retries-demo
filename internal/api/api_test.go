@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -556,5 +555,3 @@ func TestJSONResponsesSetNosniff(t *testing.T) {
 		t.Errorf("X-Content-Type-Options = %q, want nosniff", got)
 	}
 }
-
-var _ = bytes.MinRead // keep the bytes import honest if assertions are trimmed

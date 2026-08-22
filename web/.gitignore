@@ -8,7 +8,14 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+
+# Build output is ignored, EXCEPT the committed dist/index.html placeholder:
+# //go:embed all:dist in embed.go fails the Go build outright if dist is missing
+# or empty, so a fresh clone must contain that one file. The pattern must be
+# `dist/*` rather than `dist` -- git never descends into an ignored directory,
+# which would make the negation below unreachable.
+dist/*
+!dist/index.html
 dist-ssr
 *.local
 

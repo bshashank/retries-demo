@@ -1,0 +1,171 @@
+.dag {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dag__legend {
+  display: flex;
+  gap: 16px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.dag__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dag__legend-line {
+  stroke: var(--text-muted);
+  stroke-width: 2;
+}
+
+.dag__legend-dot {
+  fill: var(--text-muted);
+}
+
+.dag__legend-dot--hollow {
+  fill: var(--bg-panel);
+  stroke: var(--text-muted);
+  stroke-width: 1.5;
+}
+
+.dag__canvas {
+  position: relative;
+  padding: 16px;
+  min-width: 0;
+}
+
+.dag__edges {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.dag__tiers {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 46px;
+}
+
+.dag__tier {
+  position: relative;
+  padding-left: 58px;
+}
+
+.dag__tier-caption {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.dag__row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+/* A lone tier-1 node sits over the middle of the tier below it. */
+.dag__row[data-single="true"] > * {
+  grid-column: 2 / 4;
+}
+
+/* ── Edges ───────────────────────────────────────────────────────────────── */
+.dag__edge {
+  fill: none;
+  stroke: var(--tone, var(--text-dim));
+  transition: stroke 420ms ease, stroke-opacity 420ms ease;
+  pointer-events: stroke;
+}
+
+.dag__edge--essential {
+  stroke-width: 2.2;
+  stroke-opacity: 0.95;
+}
+
+.dag__edge--optional {
+  stroke-width: 1.6;
+  stroke-dasharray: 5 5;
+  stroke-opacity: 0.55;
+}
+
+.dag__arrow {
+  transition: fill 420ms ease;
+}
+.dag__arrow--ok {
+  fill: var(--status-ok);
+}
+.dag__arrow--degraded {
+  fill: var(--status-degraded);
+}
+.dag__arrow--failing {
+  fill: var(--status-failing);
+}
+
+/* Filled dot = essential, hollow dot = non-essential. A second, non-colour
+   channel for the classification, mirrored in the legend. */
+.dag__edge-marker {
+  transition: fill 420ms ease, stroke 420ms ease;
+}
+
+.dag__edge-marker--essential {
+  fill: var(--tone, var(--text-dim));
+  stroke: var(--bg-panel);
+  stroke-width: 1.5;
+}
+
+.dag__edge-marker--optional {
+  fill: var(--bg-panel);
+  stroke: var(--tone, var(--text-dim));
+  stroke-width: 1.6;
+  stroke-dasharray: none;
+}
+
+.dag__edge-tag rect {
+  stroke-width: 1;
+}
+
+.dag__edge-tag text {
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-anchor: middle;
+}
+
+.dag__edge-tag--contained rect {
+  fill: rgba(63, 185, 80, 0.16);
+  stroke: var(--status-ok-edge);
+}
+.dag__edge-tag--contained text {
+  fill: var(--status-ok);
+}
+
+.dag__edge-tag--propagating rect {
+  fill: rgba(244, 84, 79, 0.16);
+  stroke: var(--status-failing-edge);
+}
+.dag__edge-tag--propagating text {
+  fill: var(--status-failing);
+}
+
+@media (max-width: 900px) {
+  .dag__legend {
+    display: none;
+  }
+}

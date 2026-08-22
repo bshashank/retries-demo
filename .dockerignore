@@ -1,0 +1,36 @@
+# Keep the build context small and, more importantly, deterministic.
+
+.git
+.gitignore
+.github
+
+# Never ship or upload local node_modules: they are platform-specific and huge.
+node_modules
+web/node_modules
+**/node_modules
+
+# The local web/dist is a committed placeholder (and, after a local `npm run
+# build`, possibly stale). Excluding it forces the image to use the frontend
+# built by stage 1, so the container can never ship yesterday's UI.
+web/dist
+
+# Assignment material and scratch notes.
+*.pdf
+from-gemini.txt
+DEPLOY.md
+*.md
+
+# Local build output and editor noise.
+server
+server.exe
+/bin
+/dist
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Test/coverage artifacts.
+*.test
+*.out
+coverage*

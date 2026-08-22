@@ -1,30 +1,33 @@
-# Assignment briefs / reference PDFs — not part of the deliverable
-*.pdf
-
-# Go
-/server
-/pipelinehealth
-*.exe
+# Go build output
+server
+server.exe
+/bin/
 *.test
 *.out
+coverage*
 
 # Node
 node_modules/
-dist/
-dist-ssr/
-*.local
+web/node_modules/
 npm-debug.log*
-yarn-debug.log*
-pnpm-debug.log*
+.npm
 
-# Env / secrets
-.env
-.env.*
-!.env.example
+# Frontend build output.
+#
+# IMPORTANT: web/dist/index.html is a committed placeholder, not build output.
+# It exists so `go build` succeeds before the frontend has ever been built --
+# //go:embed all:dist fails hard on a missing or empty directory, which would
+# break both a fresh clone and the Docker Go stage.
+#
+# Note the pattern must be `web/dist/*`, not `web/dist/`: git never descends
+# into an ignored directory, so a trailing-slash rule makes the negation below
+# unreachable.
+web/dist/*
+!web/dist/index.html
 
 # Editor / OS
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.pdf

@@ -76,10 +76,10 @@ func nodeSpecs() []nodeSpec {
 		{NodeTest, "Test Suite", 2, 40 * time.Millisecond, 16, 64},
 		{NodeSecurityScan, "Security Scan", 2, 20 * time.Millisecond, 12, 64},
 		{NodeTelemetry, "Telemetry Reporter", 2, 15 * time.Millisecond, 12, 64},
-		{NodeArtifactStore, "Artifact Store", 3, 25 * time.Millisecond, 8, 64},
+		{NodeArtifactStore, "Artifact Store", 3, 25 * time.Millisecond, 6, 64},
 		{NodeRegistry, "Container Registry", 3, 30 * time.Millisecond, 8, 64},
 		{NodeSAST, "SAST Engine", 3, 60 * time.Millisecond, 6, 64},
-		{NodeKafka, "Kafka Event Bus", 3, 25 * time.Millisecond, 2, 64},
+		{NodeKafka, "Kafka Event Bus", 3, 30 * time.Millisecond, 2, 64},
 	}
 }
 

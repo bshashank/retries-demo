@@ -45,7 +45,7 @@ export function groupByTier(nodes: readonly NodeSnapshot[]): Tier[] {
 }
 
 export const TIER_CAPTIONS: Readonly<Record<number, string>> = {
-  1: 'Tier 1 · entry point',
-  2: 'Tier 2 · pipeline stages',
-  3: 'Tier 3 · backing services',
+  1: 'Tier 1 · entry',
+  2: 'Tier 2 · stages',
+  3: 'Tier 3 · backing',
 }

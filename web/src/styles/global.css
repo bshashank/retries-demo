@@ -1,0 +1,284 @@
+/* ── Design tokens ───────────────────────────────────────────────────────── */
+:root {
+  /* Surfaces, darkest to lightest. */
+  --bg-root: #0a0d13;
+  --bg-canvas: #0e121b;
+  --bg-panel: #141a25;
+  --bg-raised: #1b2231;
+  --bg-inset: #0b0f17;
+
+  --border: #232c3d;
+  --border-strong: #33405a;
+
+  --text: #e7edf5;
+  --text-muted: #93a1b8;
+  --text-dim: #64748b;
+
+  --accent: #4d9fff;
+  --accent-dim: #2b6cb8;
+
+  --status-ok: #3fb950;
+  --status-ok-bg: rgba(63, 185, 80, 0.12);
+  --status-ok-edge: rgba(63, 185, 80, 0.45);
+
+  --status-degraded: #e3a008;
+  --status-degraded-bg: rgba(227, 160, 8, 0.13);
+  --status-degraded-edge: rgba(227, 160, 8, 0.5);
+
+  --status-failing: #f4544f;
+  --status-failing-bg: rgba(244, 84, 79, 0.14);
+  --status-failing-edge: rgba(244, 84, 79, 0.55);
+
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "SF Mono", "Cascadia Mono", Menlo, Consolas,
+    "Liberation Mono", monospace;
+
+  --radius: 8px;
+  --radius-sm: 5px;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.28);
+
+  /* Status colour changes ease so an escalation reads as a transition, not a flicker. */
+  --status-transition: background-color 420ms ease, border-color 420ms ease, color 420ms ease,
+    box-shadow 420ms ease, stroke 420ms ease, fill 420ms ease;
+
+  color-scheme: dark;
+}
+
+/* Status tone -> concrete colours. Every element that carries a status sets
+   `data-status="ok|degraded|failing"` and inherits from here. */
+[data-status="ok"] {
+  --tone: var(--status-ok);
+  --tone-bg: var(--status-ok-bg);
+  --tone-edge: var(--status-ok-edge);
+}
+[data-status="degraded"] {
+  --tone: var(--status-degraded);
+  --tone-bg: var(--status-degraded-bg);
+  --tone-edge: var(--status-degraded-edge);
+}
+[data-status="failing"] {
+  --tone: var(--status-failing);
+  --tone-bg: var(--status-failing-bg);
+  --tone-edge: var(--status-failing-edge);
+}
+
+/* ── Reset ───────────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-root);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol {
+  margin: 0;
+}
+
+ul,
+ol {
+  padding: 0;
+  list-style: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Numbers are always monospace so digits don't jitter as values change. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── App shell ───────────────────────────────────────────────────────────── */
+.app {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px 20px;
+  background:
+    radial-gradient(1100px 520px at 12% -12%, rgba(77, 159, 255, 0.07), transparent 70%),
+    var(--bg-root);
+}
+
+.app__masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.masthead__title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.masthead__mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 12px rgba(77, 159, 255, 0.7);
+  transform: translateY(-1px);
+}
+
+.masthead__badge {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.masthead__blurb {
+  max-width: 78ch;
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.masthead__blurb strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.app__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 336px;
+  gap: 14px;
+  align-items: start;
+}
+
+.app__left {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.app__right {
+  min-width: 0;
+}
+
+@media (max-width: 1120px) {
+  .app__body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── Shared panel chrome ─────────────────────────────────────────────────── */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel__title {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* ── Loading / empty state ───────────────────────────────────────────────── */
+.awaiting {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 300px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.awaiting__spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
+.awaiting code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
