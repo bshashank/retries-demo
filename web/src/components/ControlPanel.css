@@ -294,3 +294,45 @@
   background: rgba(147, 161, 184, 0.14);
   color: var(--text-muted);
 }
+
+.controls__edge-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.controls__edge-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.controls__edge-legend-tag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 3px;
+  letter-spacing: 0.05em;
+}
+
+.controls__edge-legend-tag--ess {
+  background: rgba(244, 84, 79, 0.15);
+  color: #f4544f;
+  border: 1px solid rgba(244, 84, 79, 0.35);
+}
+
+.controls__edge-legend-tag--opt {
+  background: rgba(227, 160, 8, 0.15);
+  color: #e3a008;
+  border: 1px solid rgba(227, 160, 8, 0.35);
+}
+

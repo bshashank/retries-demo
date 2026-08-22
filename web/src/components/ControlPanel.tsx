@@ -170,6 +170,17 @@ function ControlPanelBase({
             <span className="controls__hint">flip live, mid-incident</span>
           </h3>
 
+          <div className="controls__edge-legend">
+            <div className="controls__edge-legend-item">
+              <span className="controls__edge-legend-tag controls__edge-legend-tag--ess mono">ESSENTIAL (Solid)</span>
+              <span>Full deadline pass-through. Child failure escalates to <strong>FAILING</strong>.</span>
+            </div>
+            <div className="controls__edge-legend-item">
+              <span className="controls__edge-legend-tag controls__edge-legend-tag--opt mono">OPTIONAL (Dashed)</span>
+              <span>300ms timeout boundary. Failure is contained at <strong>DEGRADED</strong>.</span>
+            </div>
+          </div>
+
           <ul className="controls__edges">
             {edges.map((edge) => {
               const key = `${edge.from}->${edge.to}`

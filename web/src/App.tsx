@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ScenarioInfo } from './types'
 import { httpApi } from './lib/api'
-import { computeDependencyInsights } from './lib/insights'
+import { computeDependencyInsights, computeSystemDiagnostic } from './lib/insights'
 import { formatClock } from './lib/format'
 import { useSimulationStream } from './hooks/useSimulationStream'
 import { useEventLog } from './hooks/useEventLog'
 import { createMockEngine, isMockMode } from './mock/mockSnapshot'
 import { GlobalHealthBanner } from './components/GlobalHealthBanner'
+import { CausalDiagnosticCard } from './components/CausalDiagnosticCard'
 import { DagView } from './components/DagView'
 import { ControlPanel } from './components/ControlPanel'
 import { EventLog } from './components/EventLog'
@@ -68,6 +69,12 @@ export default function App() {
     () => edges ?? [],
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by value, not identity
     [edgeSignature],
+  )
+
+  const diagnostic = useMemo(
+    () =>
+      snapshot ? computeSystemDiagnostic(snapshot.global, snapshot.nodes, snapshot.edges) : null,
+    [snapshot],
   )
 
   const insights = useMemo(
@@ -153,6 +160,8 @@ export default function App() {
             runP95Ms={snapshot.runP95Ms}
             stale={stream.stale}
           />
+
+          {diagnostic && <CausalDiagnosticCard diagnostic={diagnostic} />}
 
           <div className="app__body">
             <div className="app__left">

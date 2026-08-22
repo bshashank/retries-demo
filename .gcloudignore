@@ -1,11 +1,9 @@
-﻿.gcloudignore
+.gcloudignore
 .git
-.gitignore
 .github
 node_modules/
 web/node_modules/
-/server
-/server.exe
+server.exe
 *.test
 *.out
 coverage*

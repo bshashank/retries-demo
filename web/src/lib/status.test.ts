@@ -9,6 +9,7 @@ import {
   statusSeverity,
   worstStatus,
 } from './status'
+import { computeSystemDiagnostic } from './insights'
 
 /**
  * The status -> presentation mapping is the one place the three states are
@@ -127,3 +128,76 @@ describe('levelPresentation', () => {
     expect(new Set(levels.map((l) => levelPresentation(l).color)).size).toBe(3)
   })
 })
+
+describe('computeSystemDiagnostic', () => {
+  const dummyNodes = [
+    {
+      id: 'orchestrator',
+      label: 'Pipeline Orchestrator',
+      tier: 0,
+      baseLatencyMs: 10,
+      localStatus: 'OK' as Status,
+      rollupStatus: 'OK' as Status,
+      queueDepth: 0,
+      queueCapacity: 128,
+      inFlight: 0,
+      workers: 8,
+      p50LatencyMs: 20,
+      p95LatencyMs: 50,
+      meanQueueWaitMs: 0,
+      throughputPerSec: 20,
+      errorRate: 0,
+      rejectRate: 0,
+      abandonRate: 0,
+      latencyMultiplier: 1,
+      failRate: 0,
+    },
+    {
+      id: 'security-scan',
+      label: 'Security Scan',
+      tier: 1,
+      baseLatencyMs: 30,
+      localStatus: 'FAILING' as Status,
+      rollupStatus: 'FAILING' as Status,
+      queueDepth: 10,
+      queueCapacity: 64,
+      inFlight: 4,
+      workers: 4,
+      p50LatencyMs: 300,
+      p95LatencyMs: 300,
+      meanQueueWaitMs: 200,
+      throughputPerSec: 5,
+      errorRate: 1,
+      rejectRate: 0,
+      abandonRate: 0,
+      latencyMultiplier: 10,
+      failRate: 0,
+    },
+  ]
+
+  it('explains OK status clearly', () => {
+    const diag = computeSystemDiagnostic('OK', dummyNodes, [])
+    expect(diag.status).toBe('OK')
+    expect(diag.headline).toContain('Operational')
+    expect(diag.reason).toContain('operating')
+  })
+
+  it('explains DEGRADED containment when edge is non-essential', () => {
+    const edges = [{ from: 'orchestrator', to: 'security-scan', essential: false, timeoutMs: 300 }]
+    const diag = computeSystemDiagnostic('DEGRADED', dummyNodes, edges)
+    expect(diag.status).toBe('DEGRADED')
+    expect(diag.mechanismDetail).toContain('300ms')
+    expect(diag.activeChains).toHaveLength(1)
+    expect(diag.activeChains[0].type).toBe('contained_isolation')
+  })
+
+  it('explains FAILING cascade when edge is essential', () => {
+    const edges = [{ from: 'orchestrator', to: 'security-scan', essential: true, timeoutMs: 2000 }]
+    const diag = computeSystemDiagnostic('FAILING', dummyNodes, edges)
+    expect(diag.status).toBe('FAILING')
+    expect(diag.mechanismDetail).toContain('Essential')
+    expect(diag.activeChains).toHaveLength(1)
+    expect(diag.activeChains[0].type).toBe('essential_escalation')
+  })
+})
+
