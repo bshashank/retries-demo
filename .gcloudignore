@@ -1,0 +1,16 @@
+﻿.gcloudignore
+.git
+.gitignore
+.github
+node_modules/
+web/node_modules/
+/server
+/server.exe
+*.test
+*.out
+coverage*
+*.pdf
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,6 +1,6 @@
 # Go build output
-server
-server.exe
+/server
+/server.exe
 /bin/
 *.test
 *.out
