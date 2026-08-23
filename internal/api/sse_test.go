@@ -308,6 +308,96 @@ func TestSSEMultipleConcurrentClients(t *testing.T) {
 	}
 }
 
+// TestSSEConnectionCapReturns503 is the fix for a real pre-launch finding: an
+// unbounded number of concurrent /api/stream connections could alone exhaust
+// Cloud Run's per-instance request-concurrency budget (this deploy pins
+// --max-instances 1), taking the whole service down for every route, not
+// just degrading the shared simulation state the other endpoints
+// intentionally allow. Once maxStreamConnections is held open, the next
+// connection must get a clean 503 rather than either blocking forever or
+// being admitted anyway; freeing a slot must let a new connection back in.
+func TestSSEConnectionCapReturns503(t *testing.T) {
+	f := newFake()
+	srv, _ := streamServer(t, f, Options{
+		SnapshotInterval:  time.Hour,
+		KeepaliveInterval: time.Hour,
+	})
+	defer srv.Close()
+
+	connect := func() (*http.Response, context.CancelFunc, error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/stream", nil)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			cancel()
+			return nil, nil, err
+		}
+		return resp, cancel, nil
+	}
+
+	// Fill every slot and confirm each one actually connected (200, not 503).
+	type held struct {
+		resp   *http.Response
+		cancel context.CancelFunc
+	}
+	conns := make([]held, 0, maxStreamConnections)
+	defer func() {
+		for _, c := range conns {
+			c.cancel()
+			c.resp.Body.Close()
+		}
+	}()
+
+	for i := 0; i < maxStreamConnections; i++ {
+		resp, cancel, err := connect()
+		if err != nil {
+			t.Fatalf("client %d: connect: %v", i, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("client %d: status = %d, want 200 (slot %d of %d should still be free)",
+				i, resp.StatusCode, i, maxStreamConnections)
+		}
+		conns = append(conns, held{resp: resp, cancel: cancel})
+	}
+
+	// One more, past the cap, must be refused rather than admitted or hung.
+	over, overCancel, err := connect()
+	if err != nil {
+		t.Fatalf("connect past the cap: %v", err)
+	}
+	defer overCancel()
+	defer over.Body.Close()
+	if over.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status past the cap = %d, want 503", over.StatusCode)
+	}
+
+	// Freeing one slot must let a new connection through.
+	conns[0].cancel()
+	conns[0].resp.Body.Close()
+	conns = conns[1:]
+
+	deadline := time.Now().Add(3 * time.Second)
+	var reconnected *http.Response
+	var reconnectCancel context.CancelFunc
+	for time.Now().Before(deadline) {
+		resp, cancel, err := connect()
+		if err == nil && resp.StatusCode == http.StatusOK {
+			reconnected, reconnectCancel = resp, cancel
+			break
+		}
+		if err == nil {
+			resp.Body.Close()
+			cancel()
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reconnected == nil {
+		t.Fatal("freeing a slot did not let a new connection through within 3s")
+	}
+	reconnectCancel()
+	reconnected.Body.Close()
+}
+
 // nonFlushWriter deliberately does not implement http.Flusher.
 type nonFlushWriter struct{ rec *httptest.ResponseRecorder }
 

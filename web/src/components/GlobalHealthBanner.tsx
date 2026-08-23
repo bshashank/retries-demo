@@ -9,6 +9,10 @@ export interface GlobalHealthBannerProps {
   runSuccessRate: number
   runsPerSec: number
   runP95Ms: number
+  /** Success rate among release-candidate runs — never shed by a saturated gate. */
+  runSuccessRateRC: number
+  /** Success rate among Normal-priority runs — the only class a saturated gate sheds. */
+  runSuccessRateNormal: number
   /** Data is being shown but the stream is not live. */
   stale?: boolean
 }
@@ -26,9 +30,14 @@ function GlobalHealthBannerBase({
   runSuccessRate,
   runsPerSec,
   runP95Ms,
+  runSuccessRateRC,
+  runSuccessRateNormal,
   stale = false,
 }: GlobalHealthBannerProps) {
   const presentation = statusPresentation(status)
+  // A meaningful gap only shows up once a gate is actually shedding Normal
+  // traffic; below that the split is just sampling noise on ~10% RC volume.
+  const showPrioritySplit = runSuccessRateRC - runSuccessRateNormal > 0.02
 
   return (
     <section
@@ -56,6 +65,18 @@ function GlobalHealthBannerBase({
           <dt>Run success rate</dt>
           <dd className="mono">{formatPercent(runSuccessRate)}</dd>
         </div>
+        {showPrioritySplit && (
+          <>
+            <div className="banner__stat" data-tone="ok">
+              <dt>Release-candidate success</dt>
+              <dd className="mono">{formatPercent(runSuccessRateRC)}</dd>
+            </div>
+            <div className="banner__stat" data-tone="degraded">
+              <dt>Normal-priority success</dt>
+              <dd className="mono">{formatPercent(runSuccessRateNormal)}</dd>
+            </div>
+          </>
+        )}
         <div className="banner__stat">
           <dt>Runs / sec</dt>
           <dd className="mono">{formatRate(runsPerSec)}</dd>

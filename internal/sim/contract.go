@@ -14,6 +14,33 @@ const (
 	StatusFailing  Status = "FAILING"
 )
 
+// DependencyMode classifies one edge. It replaces a plain essential/non-
+// essential boolean because a boolean silently conflates two questions: does
+// a failure here propagate (correctness), and does this call block the
+// caller (dispatch). Most edges genuinely only need the first question
+// answered, but a release gate (SAST, the container registry) needs an
+// answer that's essential for correctness yet must not block — hence a
+// third mode instead of a second, independently toggleable flag.
+type DependencyMode string
+
+const (
+	// ModeBlocking: essential, synchronous, unbounded latency pass-through.
+	// The classic case — no build, no pipeline.
+	ModeBlocking DependencyMode = "blocking"
+	// ModeBestEffort: non-essential, bounded by nonEssentialTimeout, proceeds
+	// and degrades on failure or timeout.
+	ModeBestEffort DependencyMode = "best_effort"
+	// ModeGated: essential, but dispatched through service.gatedCall instead
+	// of a direct blocking call — a resolves-fast-when-healthy, holds-when-
+	// slow, sheds-non-RC-when-saturated pattern. See service.go.
+	ModeGated DependencyMode = "gated"
+)
+
+// modeEssential derives whether a mode's failure propagates to the caller.
+// This is the only property rollup.go ever needs to know about a mode — it
+// stays completely unaware that gated dependencies exist.
+func modeEssential(m DependencyMode) bool { return m != ModeBestEffort }
+
 // Node IDs. The topology is fixed.
 const (
 	NodeOrchestrator = "orchestrator"
@@ -58,12 +85,16 @@ type NodeSnapshot struct {
 	FailRate          float64 `json:"failRate"`
 }
 
-// EdgeSnapshot is one dependency relationship. Essential is runtime-toggleable.
+// EdgeSnapshot is one dependency relationship. Mode is runtime-toggleable.
 type EdgeSnapshot struct {
-	From      string  `json:"from"`
-	To        string  `json:"to"`
-	Essential bool    `json:"essential"`
-	TimeoutMs float64 `json:"timeoutMs"`
+	From string         `json:"from"`
+	To   string         `json:"to"`
+	Mode DependencyMode `json:"mode"`
+	// SupportsGated: true only for edges whose target has gate config (a
+	// gateHoldBudget), i.e. the edges ModeGated is physically meaningful for.
+	// The UI uses this to decide whether to offer a "gated" option at all.
+	SupportsGated bool    `json:"supportsGated"`
+	TimeoutMs     float64 `json:"timeoutMs"`
 }
 
 // EventLevel maps to UI severity colouring.
@@ -93,6 +124,14 @@ type Snapshot struct {
 	RunSuccessRate float64 `json:"runSuccessRate"`
 	RunP95Ms       float64 `json:"runP95Ms"`
 
+	// RunSuccessRateRC / RunSuccessRateNormal split the same success rate by
+	// priority. This is the measured proof of the whole release-gate
+	// mechanism: only Normal-priority runs can ever be shed, so a saturated
+	// gate should show RunSuccessRateNormal dropping while RunSuccessRateRC
+	// stays high — even while the global banner reads FAILING.
+	RunSuccessRateRC     float64 `json:"runSuccessRateRC"`
+	RunSuccessRateNormal float64 `json:"runSuccessRateNormal"`
+
 	Nodes  []NodeSnapshot `json:"nodes"`
 	Edges  []EdgeSnapshot `json:"edges"`
 	Events []Event        `json:"events"`
@@ -107,8 +146,10 @@ type Controller interface {
 	// probability (0..1) on a node. Returns an error for an unknown node ID.
 	Inject(nodeID string, latencyMultiplier, failRate float64) error
 
-	// SetEdgeEssential reclassifies a dependency at runtime.
-	SetEdgeEssential(from, to string, essential bool) error
+	// SetEdgeMode reclassifies a dependency at runtime. Returns an error for
+	// an unknown edge, or for ModeGated on an edge whose target has no gate
+	// config.
+	SetEdgeMode(from, to string, mode DependencyMode) error
 
 	// ApplyScenario applies a named preset. Returns an error for an unknown name.
 	ApplyScenario(name string) error

@@ -228,6 +228,7 @@ type runSample struct {
 	at      time.Time
 	latency time.Duration
 	ok      bool
+	rc      bool
 }
 
 // runMetrics is the run-level rolling window fed by the load generator.
@@ -243,11 +244,11 @@ func newRunMetrics(window time.Duration) *runMetrics {
 	return &runMetrics{window: window, now: time.Now}
 }
 
-func (r *runMetrics) Record(latency time.Duration, ok bool) {
+func (r *runMetrics) Record(latency time.Duration, ok, rc bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	r.samples = append(r.samples, runSample{at: now, latency: latency, ok: ok})
+	r.samples = append(r.samples, runSample{at: now, latency: latency, ok: ok, rc: rc})
 	if len(r.samples) > pruneHighWater {
 		r.pruneLocked(now)
 	}
@@ -266,6 +267,13 @@ type runView struct {
 	RunsPerSec  float64
 	SuccessRate float64
 	P95Ms       float64
+
+	// SuccessRateRC / SuccessRateNormal split SuccessRate by priority — the
+	// measured proof that a saturated gate sheds Normal traffic and nothing
+	// else. Default to 1 (not 0) on an empty class so an early, thin sample
+	// doesn't flash a false failure before real data accumulates.
+	SuccessRateRC     float64
+	SuccessRateNormal float64
 }
 
 func (r *runMetrics) Read(now time.Time) runView {
@@ -273,16 +281,27 @@ func (r *runMetrics) Read(now time.Time) runView {
 	defer r.mu.Unlock()
 	r.pruneLocked(now)
 
-	var v runView
+	v := runView{SuccessRateRC: 1, SuccessRateNormal: 1}
 	n := len(r.samples)
 	if n == 0 {
 		return v
 	}
-	okCount := 0
+	okCount, okRC, nRC, okNormal, nNormal := 0, 0, 0, 0, 0
 	latencies := make([]float64, 0, n)
 	for _, s := range r.samples {
 		if s.ok {
 			okCount++
+		}
+		if s.rc {
+			nRC++
+			if s.ok {
+				okRC++
+			}
+		} else {
+			nNormal++
+			if s.ok {
+				okNormal++
+			}
 		}
 		latencies = append(latencies, float64(s.latency)/float64(time.Millisecond))
 	}
@@ -290,6 +309,12 @@ func (r *runMetrics) Read(now time.Time) runView {
 		v.RunsPerSec = float64(n) / sec
 	}
 	v.SuccessRate = float64(okCount) / float64(n)
+	if nRC > 0 {
+		v.SuccessRateRC = float64(okRC) / float64(nRC)
+	}
+	if nNormal > 0 {
+		v.SuccessRateNormal = float64(okNormal) / float64(nNormal)
+	}
 	sort.Float64s(latencies)
 	v.P95Ms = percentile(latencies, 0.95)
 	return v

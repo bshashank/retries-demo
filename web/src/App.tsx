@@ -64,7 +64,7 @@ export default function App() {
   )
 
   const edgeSignature =
-    edges?.map((e) => `${e.from}>${e.to}:${e.essential ? 1 : 0}:${e.timeoutMs}`).join('|') ?? ''
+    edges?.map((e) => `${e.from}>${e.to}:${e.mode}:${e.timeoutMs}`).join('|') ?? ''
   const stableEdges = useMemo(
     () => edges ?? [],
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by value, not identity
@@ -73,7 +73,15 @@ export default function App() {
 
   const diagnostic = useMemo(
     () =>
-      snapshot ? computeSystemDiagnostic(snapshot.global, snapshot.nodes, snapshot.edges) : null,
+      snapshot
+        ? computeSystemDiagnostic(
+            snapshot.global,
+            snapshot.nodes,
+            snapshot.edges,
+            snapshot.runSuccessRateRC,
+            snapshot.runSuccessRateNormal,
+          )
+        : null,
     [snapshot],
   )
 
@@ -107,9 +115,11 @@ export default function App() {
           <p className="masthead__blurb">
             A 9-service CI/CD pipeline running on real Go worker pools. Inject latency into any node
             and watch saturation cascade <strong>up</strong> the dependency graph. The same failure
-            produces a completely different global outcome depending on whether the broken dependency
-            is classified <strong>essential</strong> or <strong>non-essential</strong> — and you can
-            flip that classification live, mid-incident, with the underlying load unchanged.
+            produces a completely different global outcome depending on how the broken dependency is
+            classified — <strong>blocking</strong> (cascades), <strong>best effort</strong> (contained
+            at DEGRADED), or <strong>gated</strong> (held in a bounded backlog, shed only for
+            Normal-priority runs once saturated) — and you can flip that classification live,
+            mid-incident, with the underlying load unchanged.
           </p>
         </div>
         <ConnectionStatus
@@ -158,6 +168,8 @@ export default function App() {
             runSuccessRate={snapshot.runSuccessRate}
             runsPerSec={snapshot.runsPerSec}
             runP95Ms={snapshot.runP95Ms}
+            runSuccessRateRC={snapshot.runSuccessRateRC}
+            runSuccessRateNormal={snapshot.runSuccessRateNormal}
             stale={stream.stale}
           />
 

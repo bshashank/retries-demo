@@ -192,14 +192,21 @@ assets → distroless). One artifact, one deploy, no CORS, no separate hosting.
 
 ```
 gcloud run deploy pipeline-health --source . --region us-central1 \
-  --allow-unauthenticated --max-instances 1 --min-instances 1 --no-cpu-throttling
+  --allow-unauthenticated --max-instances 1 --min-instances 0
 ```
 
-Three flags matter and are worth a line in the rationale doc:
+Two flags matter and are worth a line in the rationale doc:
 - `--max-instances 1` — one authoritative simulation; autoscaling would give different viewers
   different worlds.
-- `--min-instances 1` + `--no-cpu-throttling` — Cloud Run throttles CPU between requests, which
-  would freeze the background simulation. Needed so queues keep draining with no viewer attached.
+- `--min-instances 0` (the default) — deliberately *not* pinned to 1. The tick loop and load
+  generator are goroutines tied to process lifetime, not to any request (`internal/sim/engine.go`),
+  and the SSE handler only reads a cached snapshot, so they run identically whether 0 or N clients
+  are connected. With no viewers, Cloud Run throttles the instance's CPU and eventually scales it
+  to zero — the simulation pauses, but since there is no persistence anywhere (`Reset()` doesn't
+  touch durable storage either), a cold start looks identical to a fresh baseline. This keeps the
+  service on Cloud Run's default *request-based* billing instead of paying for a 24/7 instance
+  that's realistically viewed for a few minutes total — the earlier `min-instances 1` +
+  `--no-cpu-throttling` pairing cost roughly $60-90/month at rest for no behavioral benefit.
 
 Prereqs: billing enabled, Cloud Run + Cloud Build + Artifact Registry APIs on.
 
@@ -251,3 +258,29 @@ call semantics, live reclassification, 4 scenario presets, SSE dashboard, Cloud 
 **Out (note as future work in the rationale doc):** circuit breakers and retry/backoff on top of
 the timeouts, per-node worker-count tuning from the UI, historical charts, multi-region,
 persistence. Estimated ~4-5h, within the assignment's 8h cap.
+
+---
+
+## Addendum: the essential/non-essential correction
+
+The original design above shipped, was deployed, and worked as described — then got reviewed
+against real CI/CD experience and found to have a genuine bug in exactly the classification this
+project's whole thesis is about, in two places:
+
+- **`Orchestrator → Security Scan` was modeled `non-essential`.** That's wrong: a pipeline that
+  can't get a SAST result can't ship. The original table above (line 35) reflects the bug, not
+  the fix.
+- **`Build → Container Registry` was modeled `non-essential`** for the same reason and caught by
+  the same review pass: CD can't deploy an image that never reached the registry.
+
+The fix is not "just mark them essential." A real release gate doesn't block a worker for hours
+(that's what "essential" meant here) and doesn't silently skip the gate (that's what
+"non-essential" meant) — it holds the pipeline run in a bounded backlog while the gate recovers,
+replays release-candidate runs against it once capacity returns, and only sheds non-
+release-candidate runs if the backlog itself saturates. That is a third dispatch shape, not a
+different value of the existing boolean — which is why the essential/non-essential flag became a
+3-valued `DependencyMode` (`blocking` / `best_effort` / `gated`) instead of gaining a second,
+independently-toggleable bit bolted onto it. See the README's "Three dependency modes, not two"
+section for the mechanism and the corrected topology and scenario table — this addendum exists so
+the record of *why* the original design was wrong stays intact rather than being silently edited
+away.

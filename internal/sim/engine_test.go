@@ -136,21 +136,21 @@ func TestEngineBaselineIsHealthy(t *testing.T) {
 	}
 }
 
-// TestNonEssentialFailureIsContained is the headline behaviour: a 10x stall on
-// the SAST engine takes its own subtree red but is capped at DEGRADED globally,
-// and - the part that proves it is real physics and not a display rule - the
-// orchestrator's own queue never moves.
-func TestNonEssentialFailureIsContained(t *testing.T) {
+// TestSASTGateContainsOrchestratorLatency is the headline containment
+// behaviour under the corrected model: Orchestrator->SecurityScan is
+// essential (ModeBlocking) by default, which would be dangerous if it meant
+// blocking on a slow SAST — but SecurityScan->SAST is ModeGated, so Security
+// Scan's own synchronous response time stays bounded by the grace window
+// regardless of how far behind SAST has fallen. The proof, as before, is
+// that the orchestrator's own queue never moves.
+func TestSASTGateContainsOrchestratorLatency(t *testing.T) {
 	if testing.Short() {
-		t.Skip("scenario needs ~25s to settle and hold")
+		t.Skip("scenario needs ~20s to settle and hold")
 	}
 	e := New()
 	defer e.Close()
 
 	time.Sleep(6 * time.Second) // fill the window at baseline
-	base := e.Snapshot()
-	baseOrch := nodeByID(base, NodeOrchestrator)
-
 	if err := e.ApplyScenario(ScenarioSASTSlow); err != nil {
 		t.Fatalf("ApplyScenario: %v", err)
 	}
@@ -162,49 +162,66 @@ func TestNonEssentialFailureIsContained(t *testing.T) {
 		t.Errorf("sast-engine rollup = %s, want it visibly unhealthy", sast.RollupStatus)
 	}
 
-	// Hold for a while: DEGRADED must be a stable equilibrium, never FAILING.
-	deadline := time.Now().Add(15 * time.Second)
-	sawSecurityScanRed := false
+	// Hold for a while, comfortably inside the gate's hold capacity so it has
+	// not saturated yet (saturation, and the FAILING it produces, is covered
+	// separately by TestSASTGateSaturatesAndProtectsReleaseCandidates). The
+	// orchestrator's own queue must stay flat throughout.
+	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		s := e.Snapshot()
-		if s.Global == StatusFailing {
-			t.Fatalf("global reached FAILING under a non-essential outage; the cap leaked.%s", describe(s))
-		}
-		if nodeByID(s, NodeSecurityScan).RollupStatus == StatusFailing {
-			sawSecurityScanRed = true
-		}
-
 		orch := nodeByID(s, NodeOrchestrator)
-		// The containment proof: the orchestrator absorbs the stall in its
-		// worker pool, not in its queue.
 		if orch.QueueDepth > 16 {
-			t.Fatalf("orchestrator queue depth reached %d; a non-essential stall must not back it up.%s",
+			t.Fatalf("orchestrator queue depth reached %d; a gated stall must not back it up.%s",
 				orch.QueueDepth, describe(s))
 		}
 		if orch.MeanQueueWaitMs > degradedQueueWaitMs {
-			t.Fatalf("orchestrator mean queue wait reached %vms (baseline %vms); a non-essential stall must not back it up.%s",
-				orch.MeanQueueWaitMs, baseOrch.MeanQueueWaitMs, describe(s))
-		}
-		if orch.RejectRate > 0 {
-			t.Fatalf("orchestrator is shedding load (%v) under a non-essential outage.%s", orch.RejectRate, describe(s))
+			t.Fatalf("orchestrator mean queue wait reached %vms; a gated stall must not back it up.%s",
+				orch.MeanQueueWaitMs, describe(s))
 		}
 		if orch.LocalStatus == StatusFailing {
-			t.Fatalf("orchestrator local status FAILING under a non-essential outage.%s", describe(s))
+			t.Fatalf("orchestrator local status FAILING under a gated stall.%s", describe(s))
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 
-	if !sawSecurityScanRed {
-		t.Error("security-scan never went FAILING; its essential SAST dependency should have taken it red")
+	final := e.Snapshot()
+	if final.RunSuccessRate < 0.8 {
+		t.Errorf("run success rate = %v under sast-slow (not yet saturated), want most runs to still succeed", final.RunSuccessRate)
+	}
+}
+
+// TestSASTGateSaturatesAndProtectsReleaseCandidates is the new headline: left
+// running long enough, the gate itself saturates and global status
+// legitimately reaches FAILING (the old non-essential ceiling could never do
+// this) — but only Normal-priority runs can ever be shed at a gate, so
+// RunSuccessRateRC should stay meaningfully higher than RunSuccessRateNormal.
+func TestSASTGateSaturatesAndProtectsReleaseCandidates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("scenario needs the gate to genuinely saturate, up to ~60s")
+	}
+	e := New()
+	defer e.Close()
+
+	time.Sleep(4 * time.Second)
+	if err := e.ApplyScenario(ScenarioSASTSlow); err != nil {
+		t.Fatalf("ApplyScenario: %v", err)
 	}
 
-	final := e.Snapshot()
-	if final.Global != StatusDegraded {
-		t.Fatalf("global settled at %s, want a stable DEGRADED.%s", final.Global, describe(final))
-	}
-	// Runs still complete: a non-essential outage costs latency, not success.
-	if final.RunSuccessRate < 0.9 {
-		t.Errorf("run success rate = %v under sast-slow, want runs to still succeed", final.RunSuccessRate)
+	waitFor(t, 90*time.Second, "global to reach FAILING once the SAST gate saturates",
+		func(s Snapshot) bool { return s.Global == StatusFailing }, e.Snapshot)
+
+	// FAILING flips the instant the gate crosses gateAdmitFraction and starts
+	// shedding, but RunSuccessRateNormal is a rolling 5s window over the
+	// run-level outcomes: it needs a few seconds of continued shedding before
+	// enough freshly-rejected Normal runs enter the window to move the
+	// average. Wait for that divergence to actually show up rather than
+	// asserting on the same tick FAILING first appeared.
+	got := waitFor(t, 20*time.Second, "RunSuccessRateNormal to drop below RunSuccessRateRC once shedding is sustained",
+		func(s Snapshot) bool { return s.RunSuccessRateRC > s.RunSuccessRateNormal }, e.Snapshot)
+
+	if got.RunSuccessRateRC <= got.RunSuccessRateNormal {
+		t.Errorf("RunSuccessRateRC (%v) should be meaningfully higher than RunSuccessRateNormal (%v) once the gate is shedding.%s",
+			got.RunSuccessRateRC, got.RunSuccessRateNormal, describe(got))
 	}
 }
 
@@ -304,11 +321,15 @@ func TestKafkaLagGrowsQueueAndStaysDegraded(t *testing.T) {
 	}
 }
 
-// Reclassifying the orchestrator's security-scan edge as essential converts the
-// contained failure into a fatal one, using the same injection.
-func TestEdgeReclassificationChangesOutcome(t *testing.T) {
+// TestSecurityScanEdgeModeChangesOutcome is the 3-way version of the demo's
+// headline claim: cycling SecurityScan->SAST through all three modes during
+// the same injected slowdown produces three different global outcomes on
+// identical load. ModeGated (the default) contains it; ModeBlocking
+// reintroduces the original unbounded cascade; ModeBestEffort silently skips
+// the check and caps back at DEGRADED — the pre-fix, wrong behaviour.
+func TestSecurityScanEdgeModeChangesOutcome(t *testing.T) {
 	if testing.Short() {
-		t.Skip("needs ~30s")
+		t.Skip("needs ~90s to cycle all three modes")
 	}
 	e := New()
 	defer e.Close()
@@ -317,14 +338,20 @@ func TestEdgeReclassificationChangesOutcome(t *testing.T) {
 	if err := e.ApplyScenario(ScenarioSASTSlow); err != nil {
 		t.Fatalf("ApplyScenario: %v", err)
 	}
-	waitFor(t, 30*time.Second, "sast-slow to reach DEGRADED",
+	waitFor(t, 30*time.Second, "sast-slow to reach DEGRADED under the default gated mode",
 		func(s Snapshot) bool { return s.Global == StatusDegraded }, e.Snapshot)
 
-	if err := e.SetEdgeEssential(NodeOrchestrator, NodeSecurityScan, true); err != nil {
-		t.Fatalf("SetEdgeEssential: %v", err)
+	if err := e.SetEdgeMode(NodeSecurityScan, NodeSAST, ModeBlocking); err != nil {
+		t.Fatalf("SetEdgeMode: %v", err)
 	}
-	waitFor(t, 30*time.Second, "global to escalate once the edge is essential",
+	waitFor(t, 30*time.Second, "global to escalate to FAILING once the edge blocks directly",
 		func(s Snapshot) bool { return s.Global == StatusFailing }, e.Snapshot)
+
+	if err := e.SetEdgeMode(NodeSecurityScan, NodeSAST, ModeBestEffort); err != nil {
+		t.Fatalf("SetEdgeMode: %v", err)
+	}
+	waitFor(t, 30*time.Second, "global to recover to DEGRADED once the edge is best-effort",
+		func(s Snapshot) bool { return s.Global == StatusDegraded }, e.Snapshot)
 }
 
 func TestControllerErrorsOnUnknownIDs(t *testing.T) {
@@ -337,18 +364,23 @@ func TestControllerErrorsOnUnknownIDs(t *testing.T) {
 	if err := e.Inject(NodeBuild, 2, 0.1); err != nil {
 		t.Errorf("Inject on a known node failed: %v", err)
 	}
-	if err := e.SetEdgeEssential("no-such-node", NodeBuild, true); err == nil {
-		t.Error("SetEdgeEssential accepted an unknown source")
+	if err := e.SetEdgeMode("no-such-node", NodeBuild, ModeBlocking); err == nil {
+		t.Error("SetEdgeMode accepted an unknown source")
 	}
-	if err := e.SetEdgeEssential(NodeBuild, "no-such-node", true); err == nil {
-		t.Error("SetEdgeEssential accepted an unknown target")
+	if err := e.SetEdgeMode(NodeBuild, "no-such-node", ModeBlocking); err == nil {
+		t.Error("SetEdgeMode accepted an unknown target")
 	}
 	// A real pair of nodes that is not actually an edge.
-	if err := e.SetEdgeEssential(NodeOrchestrator, NodeSAST, true); err == nil {
-		t.Error("SetEdgeEssential accepted a non-existent edge between two real nodes")
+	if err := e.SetEdgeMode(NodeOrchestrator, NodeSAST, ModeBlocking); err == nil {
+		t.Error("SetEdgeMode accepted a non-existent edge between two real nodes")
 	}
-	if err := e.SetEdgeEssential(NodeOrchestrator, NodeBuild, false); err != nil {
-		t.Errorf("SetEdgeEssential on a real edge failed: %v", err)
+	if err := e.SetEdgeMode(NodeOrchestrator, NodeBuild, ModeBestEffort); err != nil {
+		t.Errorf("SetEdgeMode on a real edge failed: %v", err)
+	}
+	// ModeGated only makes sense on an edge whose target actually has gate
+	// config — the orchestrator itself does not.
+	if err := e.SetEdgeMode(NodeOrchestrator, NodeBuild, ModeGated); err == nil {
+		t.Error("SetEdgeMode accepted ModeGated on a non-gate target")
 	}
 	if err := e.ApplyScenario("no-such-scenario"); err == nil {
 		t.Error("ApplyScenario accepted an unknown name")
@@ -402,11 +434,11 @@ func TestScenariosAreDocumented(t *testing.T) {
 	defer e.Close()
 
 	got := e.Scenarios()
-	if len(got) != 4 {
-		t.Fatalf("got %d scenarios, want 4", len(got))
+	if len(got) != 5 {
+		t.Fatalf("got %d scenarios, want 5", len(got))
 	}
 	want := map[string]bool{
-		ScenarioNominal: false, ScenarioSASTSlow: false,
+		ScenarioNominal: false, ScenarioSASTSlow: false, ScenarioRegistrySlow: false,
 		ScenarioArtifactOutage: false, ScenarioKafkaLag: false,
 	}
 	for _, s := range got {
@@ -465,7 +497,7 @@ func TestOperatorActionsEmitEvents(t *testing.T) {
 	if err := e.ApplyScenario(ScenarioSASTSlow); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.SetEdgeEssential(NodeBuild, NodeRegistry, true); err != nil {
+	if err := e.SetEdgeMode(NodeBuild, NodeRegistry, ModeBlocking); err != nil {
 		t.Fatal(err)
 	}
 	e.Reset()
@@ -504,7 +536,11 @@ func TestSnapshotIsSafeForConcurrentReaders(t *testing.T) {
 	// Mutate engine state while they read.
 	for i := 0; i < 20; i++ {
 		_ = e.Inject(NodeSAST, float64(i%5+1), 0)
-		_ = e.SetEdgeEssential(NodeOrchestrator, NodeTelemetry, i%2 == 0)
+		mode := ModeBestEffort
+		if i%2 == 0 {
+			mode = ModeBlocking
+		}
+		_ = e.SetEdgeMode(NodeOrchestrator, NodeTelemetry, mode)
 		time.Sleep(10 * time.Millisecond)
 	}
 	close(done)

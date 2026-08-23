@@ -94,14 +94,20 @@
 }
 
 .dag__edge--essential {
-  stroke-width: 2.2;
+  stroke-width: 3;
   stroke-opacity: 0.95;
 }
 
 .dag__edge--optional {
-  stroke-width: 1.6;
-  stroke-dasharray: 5 5;
-  stroke-opacity: 0.55;
+  stroke-width: 1.4;
+  stroke-dasharray: 3 3;
+  stroke-opacity: 0.7;
+}
+
+.dag__edge--gated {
+  stroke-width: 2.4;
+  stroke-dasharray: 8 3 2 3;
+  stroke-opacity: 0.85;
 }
 
 .dag__arrow {
@@ -162,6 +168,14 @@
 }
 .dag__edge-tag--propagating text {
   fill: var(--status-failing);
+}
+
+.dag__edge-tag--held rect {
+  fill: rgba(107, 147, 192, 0.16);
+  stroke: #6b93c0;
+}
+.dag__edge-tag--held text {
+  fill: #6b93c0;
 }
 
 @media (max-width: 900px) {

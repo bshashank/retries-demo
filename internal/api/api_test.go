@@ -44,8 +44,8 @@ type injectCall struct {
 }
 
 type edgeCall struct {
-	from, to  string
-	essential bool
+	from, to string
+	mode     sim.DependencyMode
 }
 
 func newFake() *fakeController {
@@ -63,7 +63,7 @@ func newFake() *fakeController {
 				LatencyMultiplier: 1,
 			}},
 			Edges: []sim.EdgeSnapshot{{
-				From: sim.NodeOrchestrator, To: sim.NodeBuild, Essential: true, TimeoutMs: 2000,
+				From: sim.NodeOrchestrator, To: sim.NodeBuild, Mode: sim.ModeBlocking, TimeoutMs: 2000,
 			}},
 			Events: []sim.Event{{
 				ID: 42, AtMs: 1700000000000, Level: sim.LevelWarn, Message: "build queue filling",
@@ -90,10 +90,10 @@ func (f *fakeController) Inject(nodeID string, latencyMultiplier, failRate float
 	return f.injectErr
 }
 
-func (f *fakeController) SetEdgeEssential(from, to string, essential bool) error {
+func (f *fakeController) SetEdgeMode(from, to string, mode sim.DependencyMode) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.edgeCalls = append(f.edgeCalls, edgeCall{from, to, essential})
+	f.edgeCalls = append(f.edgeCalls, edgeCall{from, to, mode})
 	return f.edgeErr
 }
 
@@ -278,14 +278,14 @@ func TestInjectBoundaryValuesAccepted(t *testing.T) {
 func TestEdgeHappyPath(t *testing.T) {
 	f := newFake()
 	rec := do(t, newTestRouter(t, f), http.MethodPost, "/api/edge",
-		`{"from":"orchestrator","to":"telemetry","essential":false}`)
+		`{"from":"orchestrator","to":"telemetry","mode":"best_effort"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
 	}
 	if len(f.edgeCalls) != 1 {
-		t.Fatalf("SetEdgeEssential called %d times, want 1", len(f.edgeCalls))
+		t.Fatalf("SetEdgeMode called %d times, want 1", len(f.edgeCalls))
 	}
-	want := edgeCall{"orchestrator", "telemetry", false}
+	want := edgeCall{"orchestrator", "telemetry", sim.ModeBestEffort}
 	if f.edgeCalls[0] != want {
 		t.Errorf("edge args = %+v, want %+v", f.edgeCalls[0], want)
 	}
@@ -328,7 +328,7 @@ func TestMalformedJSONRejected(t *testing.T) {
 		{"unknown field", "/api/inject", `{"nodeId":"build","latencyMultiplier":1,"failRate":0,"bogus":true}`},
 		{"trailing garbage", "/api/inject", `{"nodeId":"build","latencyMultiplier":1,"failRate":0} {}`},
 		{"edge malformed", "/api/edge", `{`},
-		{"edge unknown field", "/api/edge", `{"from":"a","to":"b","essential":true,"weight":3}`},
+		{"edge unknown field", "/api/edge", `{"from":"a","to":"b","mode":"blocking","weight":3}`},
 		{"scenario malformed", "/api/scenario", `["retry-storm"]`},
 	}
 	for _, tc := range cases {
@@ -352,8 +352,9 @@ func TestMissingRequiredFields(t *testing.T) {
 		{"no nodeId", "/api/inject", `{"latencyMultiplier":1,"failRate":0}`, "nodeId"},
 		{"no latencyMultiplier", "/api/inject", `{"nodeId":"build","failRate":0}`, "latencyMultiplier"},
 		{"no failRate", "/api/inject", `{"nodeId":"build","latencyMultiplier":1}`, "failRate"},
-		{"no from", "/api/edge", `{"to":"build","essential":true}`, "from"},
-		{"no to", "/api/edge", `{"from":"build","essential":true}`, "to"},
+		{"no from", "/api/edge", `{"to":"build","mode":"blocking"}`, "from"},
+		{"no to", "/api/edge", `{"from":"build","mode":"blocking"}`, "to"},
+		{"no mode", "/api/edge", `{"from":"orchestrator","to":"build"}`, "mode"},
 		{"no name", "/api/scenario", `{}`, "name"},
 	}
 	for _, tc := range cases {
@@ -412,7 +413,7 @@ func TestControllerErrorsBecome400(t *testing.T) {
 			func(f *fakeController) { f.injectErr = errors.New("unknown node: nope") }, "unknown node",
 		},
 		{
-			"unknown edge", "/api/edge", `{"from":"a","to":"b","essential":true}`,
+			"unknown edge", "/api/edge", `{"from":"a","to":"b","mode":"blocking"}`,
 			func(f *fakeController) { f.edgeErr = errors.New("unknown edge: a -> b") }, "unknown edge",
 		},
 		{

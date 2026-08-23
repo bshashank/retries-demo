@@ -154,7 +154,7 @@ func TestComputeRollupsUsesRealTopology(t *testing.T) {
 
 	deps := make(map[string][]rollupDep)
 	for _, e := range edges {
-		deps[e.From] = append(deps[e.From], rollupDep{To: e.To, Essential: e.Essential})
+		deps[e.From] = append(deps[e.From], rollupDep{To: e.To, Essential: modeEssential(e.Mode)})
 	}
 	local := make(map[string]Status, len(nodes))
 	for _, n := range nodes {
@@ -235,6 +235,37 @@ func TestLocalStatusIgnoresInjection(t *testing.T) {
 	v := metricsView{TotalAttempts: 200, Completed: 200, MeanQueueWaitMs: 1, P95LatencyMs: 600}
 	if got := localStatus(v); got != StatusOK {
 		t.Fatalf("localStatus = %s, want OK: slow but keeping up is not degraded", got)
+	}
+}
+
+func TestGateOccupancyStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		depth    int
+		capacity int
+		shedding bool
+		want     Status
+	}{
+		{"empty queue is OK", 0, 300, false, StatusOK},
+		{"below degraded fraction is OK", 89, 300, false, StatusOK},
+		{"at degraded fraction is DEGRADED", 90, 300, false, StatusDegraded},
+		{"high occupancy without the shedding latch is only DEGRADED", 299, 300, false, StatusDegraded},
+		// FAILING is keyed to the live latch, not a second independent
+		// fraction check — this is the fix: it must never be possible for
+		// occupancy and shedding to disagree about whether the node is FAILING.
+		{"shedding latch true is FAILING even mid-drain below the admit fraction", 250, 300, true, StatusFailing},
+		{"shedding latch true at zero occupancy is still FAILING", 0, 300, true, StatusFailing},
+		{"zero capacity is OK", 5, 0, false, StatusOK},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := gateOccupancyStatus(tc.depth, tc.capacity, tc.shedding); got != tc.want {
+				t.Fatalf("gateOccupancyStatus(%d, %d, %v) = %s, want %s", tc.depth, tc.capacity, tc.shedding, got, tc.want)
+			}
+		})
 	}
 }
 

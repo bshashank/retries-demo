@@ -182,8 +182,10 @@ describe('computeSystemDiagnostic', () => {
     expect(diag.reason).toContain('operating')
   })
 
-  it('explains DEGRADED containment when edge is non-essential', () => {
-    const edges = [{ from: 'orchestrator', to: 'security-scan', essential: false, timeoutMs: 300 }]
+  it('explains DEGRADED containment when edge is best-effort', () => {
+    const edges = [
+      { from: 'orchestrator', to: 'security-scan', mode: 'best_effort' as const, supportsGated: false, timeoutMs: 300 },
+    ]
     const diag = computeSystemDiagnostic('DEGRADED', dummyNodes, edges)
     expect(diag.status).toBe('DEGRADED')
     expect(diag.mechanismDetail).toContain('300ms')
@@ -191,13 +193,40 @@ describe('computeSystemDiagnostic', () => {
     expect(diag.activeChains[0].type).toBe('contained_isolation')
   })
 
-  it('explains FAILING cascade when edge is essential', () => {
-    const edges = [{ from: 'orchestrator', to: 'security-scan', essential: true, timeoutMs: 2000 }]
+  it('explains FAILING cascade when edge is blocking', () => {
+    const edges = [
+      { from: 'orchestrator', to: 'security-scan', mode: 'blocking' as const, supportsGated: false, timeoutMs: 2000 },
+    ]
     const diag = computeSystemDiagnostic('FAILING', dummyNodes, edges)
     expect(diag.status).toBe('FAILING')
-    expect(diag.mechanismDetail).toContain('Essential')
+    expect(diag.mechanismDetail).toContain('BLOCKING')
     expect(diag.activeChains).toHaveLength(1)
     expect(diag.activeChains[0].type).toBe('essential_escalation')
+    expect(diag.gatedShedNote).toBeNull()
+  })
+
+  it('explains DEGRADED as a gated hold when the backlog has headroom', () => {
+    const edges = [
+      { from: 'orchestrator', to: 'security-scan', mode: 'gated' as const, supportsGated: true, timeoutMs: 300 },
+    ]
+    const diag = computeSystemDiagnostic('DEGRADED', dummyNodes, edges)
+    expect(diag.status).toBe('DEGRADED')
+    expect(diag.activeChains).toHaveLength(1)
+    expect(diag.activeChains[0].type).toBe('gated_hold')
+    expect(diag.headline).toContain('Hold Queue')
+  })
+
+  it('notes a saturated gate can coexist with healthy release-candidate traffic', () => {
+    const edges = [
+      { from: 'orchestrator', to: 'security-scan', mode: 'gated' as const, supportsGated: true, timeoutMs: 300 },
+    ]
+    const diag = computeSystemDiagnostic('FAILING', dummyNodes, edges, 1, 0.4)
+    expect(diag.status).toBe('FAILING')
+    expect(diag.activeChains).toHaveLength(1)
+    expect(diag.activeChains[0].type).toBe('gated_hold')
+    expect(diag.gatedShedNote).not.toBeNull()
+    expect(diag.gatedShedNote).toContain('100%')
+    expect(diag.gatedShedNote).toContain('40%')
   })
 })
 

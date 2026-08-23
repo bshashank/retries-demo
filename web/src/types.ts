@@ -40,11 +40,21 @@ export interface NodeSnapshot {
   failRate: number
 }
 
-/** Go: sim.EdgeSnapshot. `essential` is runtime-toggleable. */
+/** Go: sim.DependencyMode */
+export type DependencyMode = 'blocking' | 'best_effort' | 'gated'
+
+/** Go: sim.modeEssential — derives whether a mode's failure propagates. */
+export function isEssential(mode: DependencyMode): boolean {
+  return mode !== 'best_effort'
+}
+
+/** Go: sim.EdgeSnapshot. `mode` is runtime-toggleable. */
 export interface EdgeSnapshot {
   from: string
   to: string
-  essential: boolean
+  mode: DependencyMode
+  /** True only for edges whose target has gate config — i.e. 'gated' is physically meaningful. */
+  supportsGated: boolean
   timeoutMs: number
 }
 
@@ -68,6 +78,15 @@ export interface Snapshot {
   runsPerSec: number
   runSuccessRate: number
   runP95Ms: number
+
+  /**
+   * runSuccessRate split by run priority. This is the measured proof of the
+   * release-gate mechanism: only Normal-priority runs can ever be shed, so a
+   * saturated gate shows runSuccessRateNormal dropping while runSuccessRateRC
+   * stays high — even while `global` reads FAILING.
+   */
+  runSuccessRateRC: number
+  runSuccessRateNormal: number
 
   nodes: NodeSnapshot[]
   edges: EdgeSnapshot[]
@@ -93,7 +112,7 @@ export interface InjectRequest {
 export interface EdgeRequest {
   from: string
   to: string
-  essential: boolean
+  mode: DependencyMode
 }
 
 /** Request body for POST /api/scenario. */

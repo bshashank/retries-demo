@@ -52,8 +52,10 @@ function CausalDiagnosticCardBase({ diagnostic }: CausalDiagnosticCardProps) {
                     <div className="diagnostic-card__chain-header">
                       <span className="diagnostic-card__chain-badge mono">
                         {chain.type === 'essential_escalation'
-                          ? '🔴 ESSENTIAL CASCADE'
-                          : '🟡 300ms TIMEOUT ISOLATION'}
+                          ? '🔴 BLOCKING CASCADE'
+                          : chain.type === 'gated_hold'
+                            ? '🔵 GATED HOLD QUEUE'
+                            : '🟡 300ms TIMEOUT ISOLATION'}
                       </span>
                       <strong className="diagnostic-card__chain-path mono">{chain.path}</strong>
                     </div>
@@ -61,6 +63,13 @@ function CausalDiagnosticCardBase({ diagnostic }: CausalDiagnosticCardProps) {
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {diagnostic.gatedShedNote && (
+            <div className="diagnostic-card__contrast" data-variant="gated">
+              <span className="diagnostic-card__contrast-tag">FAILING BANNER ≠ EVERYTHING IS FAILING</span>
+              <p className="diagnostic-card__contrast-text">{diagnostic.gatedShedNote}</p>
             </div>
           )}
 

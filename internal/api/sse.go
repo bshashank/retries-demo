@@ -19,11 +19,28 @@ import (
 //     stream when the simulation is quiet.
 //   - The loop exits on r.Context().Done(), so a disconnecting client reaps its
 //     goroutine and tickers instead of leaking them.
+//   - Concurrent connections are capped at maxStreamConnections (a.streamSem);
+//     past that, new connections get a 503 immediately rather than the
+//     unbounded stream count starving Cloud Run's per-instance request budget.
 //
 // Each connection gets its own goroutine and its own tickers; the only shared
 // state is Controller.Snapshot, which the contract documents as concurrency
 // safe. Multiple viewers therefore watch one authoritative world.
 func (a *API) handleStream(w http.ResponseWriter, r *http.Request) {
+	// A nil streamSem (an *API built by hand rather than via NewRouter, as
+	// some tests do to isolate one code path) means "no limit" rather than
+	// "always full": sending on a nil channel never succeeds, so the naive
+	// version of this check would 503 every request.
+	if a.streamSem != nil {
+		select {
+		case a.streamSem <- struct{}{}:
+			defer func() { <-a.streamSem }()
+		default:
+			writeError(w, http.StatusServiceUnavailable, "too many concurrent streams; try again shortly")
+			return
+		}
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported by this server")

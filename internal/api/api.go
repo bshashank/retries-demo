@@ -34,6 +34,18 @@ const (
 	maxLatencyMultiplier = 100
 	minFailRate          = 0
 	maxFailRate          = 1
+
+	// maxStreamConnections caps concurrent /api/stream clients. Cloud Run's
+	// default per-instance concurrency is 80, and this deploy deliberately
+	// pins --max-instances 1 (see DEPLOY.md) — with no cap here, a script
+	// opening ~80 unauthenticated SSE connections and holding them open (the
+	// stream has no server-side lifetime limit by design) would alone
+	// exhaust every request slot the single instance has, taking down "/",
+	// "/api/snapshot", and everyone else's stream too, not just degrading
+	// the shared simulation state the way the other endpoints intentionally
+	// can. Reserving headroom below 80 means an attempted exhaustion gets a
+	// clean 503 past this limit instead of starving the whole service.
+	maxStreamConnections = 40
 )
 
 // Options configures the router.
@@ -63,6 +75,10 @@ type API struct {
 	snapshotInterval  time.Duration
 	keepaliveInterval time.Duration
 	log               *slog.Logger
+
+	// streamSem bounds concurrent SSE connections. A buffered channel used as
+	// a counting semaphore: acquire by sending, release by receiving.
+	streamSem chan struct{}
 }
 
 // NewRouter builds the complete HTTP handler: the JSON/SSE API, the liveness
@@ -73,6 +89,7 @@ func NewRouter(ctrl sim.Controller, opts Options) http.Handler {
 		snapshotInterval:  opts.SnapshotInterval,
 		keepaliveInterval: opts.KeepaliveInterval,
 		log:               opts.Logger,
+		streamSem:         make(chan struct{}, maxStreamConnections),
 	}
 	if a.snapshotInterval <= 0 {
 		a.snapshotInterval = defaultSnapshotInterval

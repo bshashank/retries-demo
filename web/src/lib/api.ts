@@ -1,4 +1,4 @@
-import type { ScenarioInfo } from '../types'
+import type { DependencyMode, ScenarioInfo } from '../types'
 
 /**
  * Control surface. Mirrors the `sim.Controller` interface exposed over HTTP.
@@ -9,7 +9,7 @@ export interface SimApi {
   /** POST /api/inject */
   inject: (nodeId: string, latencyMultiplier: number, failRate: number) => Promise<void>
   /** POST /api/edge */
-  setEdgeEssential: (from: string, to: string, essential: boolean) => Promise<void>
+  setEdgeMode: (from: string, to: string, mode: DependencyMode) => Promise<void>
   /** POST /api/scenario */
   applyScenario: (name: string) => Promise<void>
   /** POST /api/reset */
@@ -34,7 +34,7 @@ export const httpApi: SimApi = {
   inject: (nodeId, latencyMultiplier, failRate) =>
     postJson('/api/inject', { nodeId, latencyMultiplier, failRate }),
 
-  setEdgeEssential: (from, to, essential) => postJson('/api/edge', { from, to, essential }),
+  setEdgeMode: (from, to, mode) => postJson('/api/edge', { from, to, mode }),
 
   applyScenario: (name) => postJson('/api/scenario', { name }),
 

@@ -7,10 +7,13 @@
  * the production render path imports anything except through that switch.
  *
  * The queueing maths here is a caricature — the real engine runs actual worker
- * pools. What it does reproduce faithfully is the *shape* of the wire contract
- * and the essential / non-essential rollup rule that the demo is about.
+ * pools. What it does reproduce faithfully is the *shape* of the wire contract,
+ * the mode-based rollup rule, and (heuristically) the RC/Normal shedding split
+ * that the demo is about. Scenario names and target nodes mirror the real
+ * backend's five presets exactly, so mock mode tells the same story as live mode.
  */
 import type {
+  DependencyMode,
   EdgeSnapshot,
   NodeSnapshot,
   ScenarioInfo,
@@ -36,6 +39,8 @@ interface NodeSpec {
   baseLatencyMs: number
   /** Nominal arrival rate in requests/sec at full pipeline throughput. */
   arrivalPerSec: number
+  /** Set only on the two gated resources (SAST Engine, Container Registry). */
+  isGate?: boolean
 }
 
 const NODE_SPECS: readonly NodeSpec[] = [
@@ -45,60 +50,60 @@ const NODE_SPECS: readonly NodeSpec[] = [
   { id: 'security-scan', label: 'Security Scan', tier: 2, workers: 4, queueCapacity: 128, baseLatencyMs: 90, arrivalPerSec: 20 },
   { id: 'telemetry', label: 'Telemetry Reporter', tier: 2, workers: 3, queueCapacity: 128, baseLatencyMs: 40, arrivalPerSec: 20 },
   { id: 'artifact-store', label: 'Artifact Store', tier: 3, workers: 8, queueCapacity: 256, baseLatencyMs: 35, arrivalPerSec: 40 },
-  { id: 'container-registry', label: 'Container Registry', tier: 3, workers: 4, queueCapacity: 128, baseLatencyMs: 60, arrivalPerSec: 20 },
-  { id: 'sast-engine', label: 'SAST Engine', tier: 3, workers: 6, queueCapacity: 96, baseLatencyMs: 180, arrivalPerSec: 20 },
+  { id: 'container-registry', label: 'Container Registry', tier: 3, workers: 4, queueCapacity: 128, baseLatencyMs: 60, arrivalPerSec: 20, isGate: true },
+  { id: 'sast-engine', label: 'SAST Engine', tier: 3, workers: 6, queueCapacity: 96, baseLatencyMs: 180, arrivalPerSec: 20, isGate: true },
   { id: 'kafka-bus', label: 'Kafka Event Bus', tier: 3, workers: 3, queueCapacity: 192, baseLatencyMs: 40, arrivalPerSec: 20 },
 ]
 
 interface EdgeSpec {
   from: string
   to: string
-  essential: boolean
+  mode: DependencyMode
   timeoutMs: number
 }
 
 const EDGE_SPECS: readonly EdgeSpec[] = [
-  { from: 'orchestrator', to: 'build', essential: true, timeoutMs: 2000 },
-  { from: 'orchestrator', to: 'test', essential: true, timeoutMs: 3000 },
-  { from: 'orchestrator', to: 'security-scan', essential: false, timeoutMs: 1500 },
-  { from: 'orchestrator', to: 'telemetry', essential: false, timeoutMs: 800 },
-  { from: 'build', to: 'artifact-store', essential: true, timeoutMs: 1200 },
-  { from: 'build', to: 'container-registry', essential: false, timeoutMs: 1200 },
-  { from: 'test', to: 'artifact-store', essential: true, timeoutMs: 1200 },
-  { from: 'security-scan', to: 'sast-engine', essential: true, timeoutMs: 2500 },
-  { from: 'telemetry', to: 'kafka-bus', essential: true, timeoutMs: 500 },
+  { from: 'orchestrator', to: 'build', mode: 'blocking', timeoutMs: 2000 },
+  { from: 'orchestrator', to: 'test', mode: 'blocking', timeoutMs: 3000 },
+  { from: 'orchestrator', to: 'security-scan', mode: 'blocking', timeoutMs: 2000 },
+  { from: 'orchestrator', to: 'telemetry', mode: 'best_effort', timeoutMs: 300 },
+  { from: 'build', to: 'artifact-store', mode: 'blocking', timeoutMs: 1200 },
+  { from: 'build', to: 'container-registry', mode: 'gated', timeoutMs: 300 },
+  { from: 'test', to: 'artifact-store', mode: 'blocking', timeoutMs: 1200 },
+  { from: 'security-scan', to: 'sast-engine', mode: 'gated', timeoutMs: 300 },
+  { from: 'telemetry', to: 'kafka-bus', mode: 'blocking', timeoutMs: 500 },
 ]
 
 const MOCK_SCENARIOS: readonly ScenarioInfo[] = [
   {
-    name: 'essential-outage',
-    label: 'Essential dependency outage',
-    description: 'Artifact Store is slowed 10x. Both Build and Test depend on it essentially.',
-    expected: 'Saturation climbs into Build and Test, then into the orchestrator. Global goes FAILING.',
+    name: 'nominal',
+    label: 'Nominal',
+    description: 'Clear every injection and restore default edge classifications. Identical to Reset.',
+    expected: 'All nine nodes settle to OK within a few seconds.',
   },
   {
-    name: 'non-essential-outage',
-    label: 'Non-essential dependency outage',
-    description: 'Kafka Event Bus is slowed 10x, taking Telemetry Reporter down with it.',
-    expected: 'Telemetry fails, but the orchestrator treats it as optional. Global stays OK / DEGRADED.',
+    name: 'sast-slow',
+    label: 'SAST Engine Slowdown (10x)',
+    description: 'The SAST engine takes 10x its normal latency. Security Scan holds calls in a bounded backlog instead of blocking or skipping them.',
+    expected: 'SAST Engine and Security Scan degrade first while the hold queue has headroom. Left running, the backlog saturates and global health escalates to FAILING — but release-candidate runs keep succeeding while Normal-priority runs get shed.',
   },
   {
-    name: 'misclassified-dependency',
-    label: 'Misclassified dependency',
-    description: 'SAST Engine is slowed 10x and Security Scan is reclassified as essential.',
-    expected: 'An advisory scanner now takes the whole pipeline down. Global goes FAILING.',
+    name: 'registry-slow',
+    label: 'Container Registry Slowdown (10x)',
+    description: 'The container registry takes 10x its normal latency. Build holds calls through the same gated pattern as SAST.',
+    expected: 'The same two-stage story as the SAST scenario, on a different branch of the graph.',
   },
   {
-    name: 'registry-slowdown',
-    label: 'Registry slowdown (contained)',
-    description: 'Container Registry is slowed 5x. Build depends on it non-essentially.',
-    expected: 'Build degrades but keeps completing runs. The blast radius stops at Build.',
+    name: 'artifact-outage',
+    label: 'Artifact Store Outage (10x)',
+    description: 'The artifact store takes 10x its normal latency. Build and Test both depend on it as a blocking call.',
+    expected: 'Artifact Store saturates, Build and Test back up behind it, and global health reaches FAILING quickly — there is no hold queue on this path to absorb the slowdown first.',
   },
   {
-    name: 'cascading-failure',
-    label: 'Cascading failure',
-    description: 'Artifact Store slowed 10x and Build slowed 5x at the same time.',
-    expected: 'Two essential hops saturate together. Everything upstream fails fast.',
+    name: 'kafka-lag',
+    label: 'Kafka Bus Lag (5x)',
+    description: 'The Kafka event bus takes 5x its normal latency. Telemetry depends on it, but the orchestrator treats Telemetry as best-effort.',
+    expected: 'Telemetry degrades and goes red, but the orchestrator times out after 300ms and keeps serving. Global health stays DEGRADED.',
   },
 ]
 
@@ -109,7 +114,7 @@ interface Injection {
 
 const edgeKey = (from: string, to: string): string => `${from}->${to}`
 
-/** Non-essential dependencies cost you one severity level, not the whole run. */
+/** Best-effort dependencies cost you one severity level, not the whole run. */
 function demote(status: Status): Status {
   if (status === 'FAILING') return 'DEGRADED'
   if (status === 'DEGRADED') return 'OK'
@@ -145,9 +150,8 @@ export function createMockEngine(options: MockEngineOptions = {}): MockEngine {
   const random = makeRandom(seed)
 
   const injections = new Map<string, Injection>()
-  const essential = new Map<string, boolean>(
-    EDGE_SPECS.map((e) => [edgeKey(e.from, e.to), e.essential]),
-  )
+  const modes = new Map<string, DependencyMode>(EDGE_SPECS.map((e) => [edgeKey(e.from, e.to), e.mode]))
+  const gateNodes = new Set(NODE_SPECS.filter((n) => n.isGate).map((n) => n.id))
   const lastRollup = new Map<string, Status>()
   let lastGlobal: Status = 'OK'
   let events: SimEvent[] = []
@@ -166,7 +170,8 @@ export function createMockEngine(options: MockEngineOptions = {}): MockEngine {
     EDGE_SPECS.map((e) => ({
       from: e.from,
       to: e.to,
-      essential: essential.get(edgeKey(e.from, e.to)) ?? e.essential,
+      mode: modes.get(edgeKey(e.from, e.to)) ?? e.mode,
+      supportsGated: gateNodes.has(e.to),
       timeoutMs: e.timeoutMs,
     }))
 
@@ -228,7 +233,14 @@ export function createMockEngine(options: MockEngineOptions = {}): MockEngine {
     }
   }
 
-  /** Deepest tier first, so a parent always sees finished children. */
+  /**
+   * Deepest tier first, so a parent always sees finished children. Blocking
+   * and gated edges both propagate the child's status as-is (both are
+   * "essential" — see modeEssential on the Go side); only best-effort demotes.
+   * A gated dependency's graduated DEGRADED-then-FAILING pacing comes from its
+   * own node-level utilization curve above, not from a special rollup rule —
+   * mirroring how the real engine keeps rollup mode-agnostic too.
+   */
   const applyRollup = (nodes: NodeSnapshot[], edges: EdgeSnapshot[]): void => {
     const byId = new Map(nodes.map((n) => [n.id, n]))
     const ordered = [...nodes].sort((a, b) => b.tier - a.tier)
@@ -238,7 +250,7 @@ export function createMockEngine(options: MockEngineOptions = {}): MockEngine {
         if (edge.from !== node.id) continue
         const child = byId.get(edge.to)
         if (!child) continue
-        contributions.push(edge.essential ? child.rollupStatus : demote(child.rollupStatus))
+        contributions.push(edge.mode === 'best_effort' ? demote(child.rollupStatus) : child.rollupStatus)
       }
       node.rollupStatus = worstStatus(contributions)
     }
@@ -277,12 +289,25 @@ export function createMockEngine(options: MockEngineOptions = {}): MockEngine {
       .filter((n) => n.tier <= 2)
       .reduce((max, n) => Math.max(max, n.p95LatencyMs), 0)
 
+    // RC/Normal split: only a saturated gate (a gate node actively rejecting)
+    // sheds Normal-priority traffic. Everything else — including a classic
+    // blocking cascade — hits both classes equally, matching the real engine
+    // (priority only ever gates admission into service.gatedCall).
+    const gatedRejecting = nodes.some((n) => gateNodes.has(n.id) && n.rejectRate > 0.02)
+    const runSuccessRate = Math.min(1, successByStatus[global] * (0.98 + random() * 0.04))
+    const runSuccessRateRC = gatedRejecting ? Math.min(1, 0.97 + random() * 0.03) : runSuccessRate
+    const runSuccessRateNormal = gatedRejecting
+      ? Math.max(0, runSuccessRate - 0.15 - random() * 0.2)
+      : runSuccessRate
+
     return {
       atMs: startedAt + ticks * intervalMs,
       global,
       runsPerSec: rateByStatus[global] * (0.96 + random() * 0.08),
-      runSuccessRate: Math.min(1, successByStatus[global] * (0.98 + random() * 0.04)),
+      runSuccessRate,
       runP95Ms: (orchestrator?.p95LatencyMs ?? 0) + essentialP95,
+      runSuccessRateRC,
+      runSuccessRateNormal,
       nodes,
       edges,
       events,
@@ -306,36 +331,35 @@ export function createMockEngine(options: MockEngineOptions = {}): MockEngine {
           : `Cleared injection on ${label}`,
       )
     },
-    async setEdgeEssential(from, to, isEssential) {
+    async setEdgeMode(from, to, mode) {
       const key = edgeKey(from, to)
-      if (!essential.has(key)) throw new Error(`unknown edge ${key}`)
-      essential.set(key, isEssential)
-      pushEvent('warn', `Edge ${from} -> ${to} reclassified as ${isEssential ? 'ESSENTIAL' : 'NON-ESSENTIAL'}`)
+      if (!modes.has(key)) throw new Error(`unknown edge ${key}`)
+      if (mode === 'gated' && !gateNodes.has(to)) {
+        throw new Error(`edge ${key} is gated but target ${to} has no gate config`)
+      }
+      modes.set(key, mode)
+      pushEvent('warn', `Edge ${from} -> ${to} reclassified as ${mode.toUpperCase()}`)
     },
     async applyScenario(name) {
       const scenario = MOCK_SCENARIOS.find((s) => s.name === name)
       if (!scenario) throw new Error(`unknown scenario ${name}`)
       injections.clear()
-      for (const e of EDGE_SPECS) essential.set(edgeKey(e.from, e.to), e.essential)
+      for (const e of EDGE_SPECS) modes.set(edgeKey(e.from, e.to), e.mode)
 
-      if (name === 'essential-outage') {
-        injections.set('artifact-store', { latencyMultiplier: 10, failRate: 0 })
-      } else if (name === 'non-essential-outage') {
-        injections.set('kafka-bus', { latencyMultiplier: 10, failRate: 0 })
-      } else if (name === 'misclassified-dependency') {
+      if (name === 'sast-slow') {
         injections.set('sast-engine', { latencyMultiplier: 10, failRate: 0 })
-        essential.set(edgeKey('orchestrator', 'security-scan'), true)
-      } else if (name === 'registry-slowdown') {
-        injections.set('container-registry', { latencyMultiplier: 5, failRate: 0 })
-      } else if (name === 'cascading-failure') {
+      } else if (name === 'registry-slow') {
+        injections.set('container-registry', { latencyMultiplier: 10, failRate: 0 })
+      } else if (name === 'artifact-outage') {
         injections.set('artifact-store', { latencyMultiplier: 10, failRate: 0 })
-        injections.set('build', { latencyMultiplier: 5, failRate: 0 })
+      } else if (name === 'kafka-lag') {
+        injections.set('kafka-bus', { latencyMultiplier: 5, failRate: 0 })
       }
-      pushEvent('warn', `Scenario applied: ${scenario.label}`)
+      pushEvent(name === 'nominal' ? 'info' : 'warn', `Scenario applied: ${scenario.label}`)
     },
     async reset() {
       injections.clear()
-      for (const e of EDGE_SPECS) essential.set(edgeKey(e.from, e.to), e.essential)
+      for (const e of EDGE_SPECS) modes.set(edgeKey(e.from, e.to), e.mode)
       pushEvent('info', 'Simulation reset: injections cleared, edge classifications restored')
     },
     async scenarios() {

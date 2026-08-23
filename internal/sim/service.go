@@ -53,16 +53,26 @@ type atomicFloat struct {
 func (a *atomicFloat) Store(v float64) { a.bits.Store(math.Float64bits(v)) }
 func (a *atomicFloat) Load() float64   { return math.Float64frombits(a.bits.Load()) }
 
-// dependency is one outgoing edge. Essential is an atomic.Bool because operators
+// atomicMode is a lock-free DependencyMode cell, the same pattern as
+// atomicFloat above for the other per-call knobs that must stay readable
+// while an operator is toggling them mid-flight.
+type atomicMode struct {
+	v atomic.Value
+}
+
+func (a *atomicMode) Store(m DependencyMode) { a.v.Store(m) }
+func (a *atomicMode) Load() DependencyMode   { return a.v.Load().(DependencyMode) }
+
+// dependency is one outgoing edge. Mode is an atomicMode because operators
 // can reclassify an edge while calls are in flight.
 type dependency struct {
 	from  string
 	to    string
 	child *service
 
-	essential        atomic.Bool
-	defaultEssential bool
-	timeout          time.Duration
+	mode        atomicMode
+	defaultMode DependencyMode
+	timeout     time.Duration
 }
 
 // service is one simulated node: a buffered channel for a queue and a fixed
@@ -78,6 +88,22 @@ type service struct {
 	queue chan *job
 	deps  []*dependency
 
+	// gateHoldBudget > 0 marks this service as a gated resource (SAST Engine,
+	// Container Registry) and is the deadline a call gets once gatedCall
+	// promotes it to a detached background attempt. Zero means "not a gate."
+	gateHoldBudget time.Duration
+
+	// shedding is a hysteresis latch for gatedCall's admission check: true once
+	// occupancy crosses gateAdmitFraction, held true until occupancy drains back
+	// down to gateResumeFraction. Without it, a hard threshold on a live queue
+	// length oscillates every tick right at the boundary — shedding drains the
+	// queue just enough to stop shedding, which lets it refill just enough to
+	// start again. tick() also reads this to derive the gate's own FAILING
+	// status, so "the banner reads FAILING" and "shedding is happening" report
+	// the exact same debounced signal instead of two thresholds that can
+	// oscillate out of phase with each other.
+	shedding atomic.Bool
+
 	latencyMultiplier atomicFloat
 	failRate          atomicFloat
 	inFlight          atomic.Int64
@@ -88,13 +114,14 @@ type service struct {
 
 func newService(spec nodeSpec) *service {
 	s := &service{
-		id:          spec.ID,
-		label:       spec.Label,
-		tier:        spec.Tier,
-		baseLatency: spec.BaseLatency,
-		workerCount: spec.Workers,
-		queue:       make(chan *job, spec.QueueCap),
-		metrics:     newMetrics(metricsWindow),
+		id:             spec.ID,
+		label:          spec.Label,
+		tier:           spec.Tier,
+		baseLatency:    spec.BaseLatency,
+		workerCount:    spec.Workers,
+		queue:          make(chan *job, spec.QueueCap),
+		gateHoldBudget: spec.GateHoldBudget,
+		metrics:        newMetrics(metricsWindow),
 	}
 	s.latencyMultiplier.Store(1)
 	s.failRate.Store(0)
@@ -148,6 +175,81 @@ func (s *service) call(ctx context.Context) Result {
 	}
 }
 
+// gateAdmitFraction is the occupancy fraction at which a gated node starts
+// shedding Normal-priority traffic. gateResumeFraction is where it stops —
+// deliberately well below gateAdmitFraction, and specifically matched to
+// gateDegradedFraction (rollup.go) so admission only reopens once the
+// backlog is back down to merely-DEGRADED territory, not just under the shed
+// line. RC calls skip this check entirely and are only ever shed if the
+// queue is genuinely at its hard capacity. This is deliberately not a
+// separate occupancy counter — the resource's own buffered channel already
+// tracks depth (queueDepth on NodeSnapshot), so gating just adds a
+// priority-aware, debounced admission threshold in front of the existing
+// enqueue rather than building parallel state that could drift from it.
+//
+// A hysteresis band this wide is still not enough to make the gate settle
+// under *sustained* overload — with admission fully open, arrival can still
+// outrun capacity, so a binary on/off gate is structurally a limit cycle
+// (fills to gateAdmitFraction, sheds down to gateResumeFraction, repeat),
+// not a stable equilibrium; hysteresis only controls the cycle's period, not
+// whether one exists. The wide band here is chosen so that period is long
+// enough (tens of seconds) not to read as flicker in a normal demo
+// interaction. A gate that converges to a true steady state under sustained
+// overload would need graduated admission (AIMD) instead of on/off — noted
+// under "what I'd do with more time."
+const (
+	gateAdmitFraction  = 0.9
+	gateResumeFraction = gateDegradedFraction
+)
+
+// gatedCall is the entry point for a ModeGated dependency: the resource being
+// gated owns the backlog, not the caller. A short synchronous grace window
+// keeps baseline behaviour (the resource is healthy) identical to a normal
+// call; if it elapses, the call is promoted to a detached background attempt
+// instead of being abandoned, and the caller is freed immediately.
+//
+// Promotion is why the job is enqueued with its own long-lived context
+// (bounded by gateHoldBudget) rather than the caller's ctx: the caller's run
+// deadline is about to expire regardless, and detaching is what lets the
+// same logical attempt keep waiting for real capacity instead of being
+// thrown away and silently retried from scratch.
+func (s *service) gatedCall(ctx context.Context, priority Priority) Result {
+	if priority == PriorityNormal && s.admitCheck() {
+		s.metrics.RecordRejected()
+		return Result{Err: ErrQueueFull}
+	}
+
+	holdCtx, cancel := context.WithTimeout(context.Background(), s.gateHoldBudget)
+	j := &job{Ctx: holdCtx, EnqueuedAt: time.Now(), Done: make(chan Result, 1)}
+
+	select {
+	case s.queue <- j:
+	default:
+		cancel()
+		s.metrics.RecordRejected()
+		return Result{Err: ErrQueueFull}
+	}
+
+	grace := time.NewTimer(nonEssentialTimeout)
+	defer grace.Stop()
+	select {
+	case res := <-j.Done:
+		cancel()
+		return res
+	case <-grace.C:
+	case <-ctx.Done():
+		// The caller gave up before the grace window even elapsed. Treat it
+		// the same as the grace window elapsing: the job itself still isn't
+		// cancelled, because holdCtx was never derived from ctx.
+	}
+
+	go func() {
+		defer cancel()
+		<-j.Done
+	}()
+	return Result{Degraded: true}
+}
+
 // worker drains the queue until it is closed.
 func (s *service) worker() {
 	defer s.wg.Done()
@@ -178,13 +280,18 @@ func (s *service) worker() {
 // The occupancy this function takes is the physics of the whole model: it is
 // what determines whether the caller's queue drains faster than it fills.
 //   - Own compute: baseLatency * injected multiplier * jitter.
-//   - Essential children are called with the caller's full remaining context and
-//     blocked on, so their latency is fully additive to this node's occupancy.
-//     That is the mechanism by which a slow leaf backs up its parents.
-//   - Non-essential children are called with a 300ms budget and their outcome is
-//     downgraded to a Degraded flag. The cost is bounded, so the parent's
+//   - ModeBlocking children are called with the caller's full remaining context
+//     and blocked on, so their latency is fully additive to this node's
+//     occupancy. That is the mechanism by which a slow leaf backs up its
+//     parents.
+//   - ModeBestEffort children are called with a 300ms budget and their outcome
+//     is downgraded to a Degraded flag. The cost is bounded, so the parent's
 //     occupancy barely moves and its queue stays flat. That containment is not
 //     asserted anywhere; it falls out of the timeout.
+//   - ModeGated children go through gatedCall instead: essential for
+//     propagation purposes (see modeEssential), but dispatched through the
+//     grace-window/hold/shed mechanism rather than a direct blocking call —
+//     see gatedCall's doc comment.
 func (s *service) process(ctx context.Context) Result {
 	mult := s.latencyMultiplier.Load()
 	if !(mult > 0) { // also catches NaN
@@ -217,20 +324,24 @@ func (s *service) process(ctx context.Context) Result {
 		wg  sync.WaitGroup
 		res Result
 	)
+	priority := priorityFromContext(ctx)
 	for _, dep := range s.deps {
 		// Read the classification exactly once per call. Reading it again on the
 		// result path would let a mid-flight toggle take one branch on the way
 		// down and the other on the way back up.
-		essential := dep.essential.Load()
+		mode := dep.mode.Load()
 
 		wg.Add(1)
-		go func(dep *dependency, essential bool) {
+		go func(dep *dependency, mode DependencyMode) {
 			defer wg.Done()
 
 			var r Result
-			if essential {
+			switch mode {
+			case ModeGated:
+				r = dep.child.gatedCall(ctx, priority)
+			case ModeBlocking:
 				r = dep.child.call(ctx)
-			} else {
+			default: // ModeBestEffort
 				cctx, cancel := context.WithTimeout(ctx, dep.timeout)
 				r = dep.child.call(cctx)
 				cancel()
@@ -238,7 +349,7 @@ func (s *service) process(ctx context.Context) Result {
 
 			mu.Lock()
 			defer mu.Unlock()
-			if essential {
+			if modeEssential(mode) {
 				if r.Err != nil && res.Err == nil {
 					res.Err = r.Err
 				}
@@ -247,11 +358,11 @@ func (s *service) process(ctx context.Context) Result {
 				}
 				return
 			}
-			// Non-essential: an error or a timeout is information, not a failure.
+			// Best-effort: an error or a timeout is information, not a failure.
 			if r.Err != nil || r.Degraded {
 				res.Degraded = true
 			}
-		}(dep, essential)
+		}(dep, mode)
 	}
 	wg.Wait()
 	return res
@@ -262,3 +373,29 @@ func (s *service) queueDepth() int { return len(s.queue) }
 
 // queueCapacity is the channel's buffer size.
 func (s *service) queueCapacity() int { return cap(s.queue) }
+
+// admitCheck updates and reads the shedding latch: crosses to true once
+// occupancy reaches gateAdmitFraction, back to false only once it drains to
+// gateResumeFraction, holding steady in between. Returns true when a
+// Normal-priority call should be shed.
+func (s *service) admitCheck() bool {
+	occupied := float64(s.queueDepth())
+	capacity := float64(s.queueCapacity())
+	if capacity <= 0 {
+		return false
+	}
+	frac := occupied / capacity
+	switch {
+	case frac >= gateAdmitFraction:
+		s.shedding.Store(true)
+	case frac <= gateResumeFraction:
+		s.shedding.Store(false)
+	}
+	return s.shedding.Load()
+}
+
+// isShedding reports the current value of the hysteresis latch without
+// mutating it — used by tick() to key a gate's FAILING status to the exact
+// same debounced signal that drives real admission, so the two can never
+// read differently at the same instant.
+func (s *service) isShedding() bool { return s.shedding.Load() }

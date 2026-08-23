@@ -130,3 +130,13 @@
   letter-spacing: -0.02em;
   color: var(--text);
 }
+
+/* Priority split: colour-coded so "RC protected, Normal shed" reads at a
+   glance, the same non-colour-alone rule applies via the dt label text. */
+.banner__stat[data-tone="ok"] dd {
+  color: var(--status-ok);
+}
+
+.banner__stat[data-tone="degraded"] dd {
+  color: var(--status-degraded);
+}

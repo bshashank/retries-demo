@@ -47,14 +47,25 @@ type nodeSpec struct {
 	BaseLatency time.Duration
 	Workers     int
 	QueueCap    int
+
+	// GateHoldBudget is only set on the target of a ModeGated edge (SAST
+	// Engine, Container Registry). Zero means "not a gate" — validateTopology
+	// rejects any edge that points ModeGated at such a node. See
+	// service.gatedCall: this is the detached, long-lived deadline a held
+	// call gets once the short synchronous grace window elapses, standing in
+	// for "hours" compressed to a demo timescale. QueueCap on a gated node
+	// does double duty as its hold capacity — see gatedCall's admission
+	// check, which is why these two nodes carry a much larger QueueCap than
+	// their own throughput would otherwise need.
+	GateHoldBudget time.Duration
 }
 
-// edgeSpec is a static dependency declaration. Essential is the *default*
-// classification; it is runtime-toggleable via Controller.SetEdgeEssential.
+// edgeSpec is a static dependency declaration. Mode is the *default*
+// classification; it is runtime-toggleable via Controller.SetEdgeMode.
 type edgeSpec struct {
-	From      string
-	To        string
-	Essential bool
+	From string
+	To   string
+	Mode DependencyMode
 }
 
 // nodeSpecs returns the fixed 9-node topology tuning table.
@@ -71,30 +82,43 @@ type edgeSpec struct {
 //     growth is actually observable rather than absorbed.
 func nodeSpecs() []nodeSpec {
 	return []nodeSpec{
-		{NodeOrchestrator, "Pipeline Orchestrator", 1, 10 * time.Millisecond, 32, 128},
-		{NodeBuild, "Build & Compile", 2, 30 * time.Millisecond, 16, 64},
-		{NodeTest, "Test Suite", 2, 40 * time.Millisecond, 16, 64},
-		{NodeSecurityScan, "Security Scan", 2, 20 * time.Millisecond, 12, 64},
-		{NodeTelemetry, "Telemetry Reporter", 2, 15 * time.Millisecond, 12, 64},
-		{NodeArtifactStore, "Artifact Store", 3, 25 * time.Millisecond, 6, 64},
-		{NodeRegistry, "Container Registry", 3, 30 * time.Millisecond, 8, 64},
-		{NodeSAST, "SAST Engine", 3, 60 * time.Millisecond, 6, 64},
-		{NodeKafka, "Kafka Event Bus", 3, 30 * time.Millisecond, 2, 64},
+		{ID: NodeOrchestrator, Label: "Pipeline Orchestrator", Tier: 1, BaseLatency: 10 * time.Millisecond, Workers: 32, QueueCap: 128},
+		{ID: NodeBuild, Label: "Build & Compile", Tier: 2, BaseLatency: 30 * time.Millisecond, Workers: 16, QueueCap: 64},
+		{ID: NodeTest, Label: "Test Suite", Tier: 2, BaseLatency: 40 * time.Millisecond, Workers: 16, QueueCap: 64},
+		{ID: NodeSecurityScan, Label: "Security Scan", Tier: 2, BaseLatency: 20 * time.Millisecond, Workers: 12, QueueCap: 64},
+		{ID: NodeTelemetry, Label: "Telemetry Reporter", Tier: 2, BaseLatency: 15 * time.Millisecond, Workers: 12, QueueCap: 64},
+		{ID: NodeArtifactStore, Label: "Artifact Store", Tier: 3, BaseLatency: 25 * time.Millisecond, Workers: 6, QueueCap: 64},
+		// Registry and SAST are the two gated resources: QueueCap is sized as
+		// a hold capacity (see nodeSpec.GateHoldBudget doc), not just short-
+		// burst absorption, which is why it's an order of magnitude bigger
+		// than every other node's.
+		{ID: NodeRegistry, Label: "Container Registry", Tier: 3, BaseLatency: 30 * time.Millisecond, Workers: 3, QueueCap: 300, GateHoldBudget: 60 * time.Second},
+		{ID: NodeSAST, Label: "SAST Engine", Tier: 3, BaseLatency: 60 * time.Millisecond, Workers: 6, QueueCap: 300, GateHoldBudget: 60 * time.Second},
+		{ID: NodeKafka, Label: "Kafka Event Bus", Tier: 3, BaseLatency: 30 * time.Millisecond, Workers: 2, QueueCap: 64},
 	}
 }
 
 // edgeSpecs returns the fixed 9-edge dependency set with default classifications.
+//
+// Orchestrator->SecurityScan is ModeBlocking, not ModeBestEffort: a pipeline
+// that can't get a SAST result can't ship, so this genuinely is essential.
+// That's safe specifically because SecurityScan's own call to SAST is
+// ModeGated (see service.gatedCall) — Security Scan's response time stays
+// bounded regardless of SAST's health, so blocking on it here never risks
+// the orchestrator's own queue backing up. The same reasoning reclassifies
+// Build->Registry: CD can't deploy without the image landing in the
+// registry, so it is essential too, and safe for the same reason.
 func edgeSpecs() []edgeSpec {
 	return []edgeSpec{
-		{NodeOrchestrator, NodeBuild, true},
-		{NodeOrchestrator, NodeTest, true},
-		{NodeOrchestrator, NodeSecurityScan, false},
-		{NodeOrchestrator, NodeTelemetry, false},
-		{NodeBuild, NodeArtifactStore, true},
-		{NodeBuild, NodeRegistry, false},
-		{NodeTest, NodeArtifactStore, true},
-		{NodeSecurityScan, NodeSAST, true},
-		{NodeTelemetry, NodeKafka, true},
+		{NodeOrchestrator, NodeBuild, ModeBlocking},
+		{NodeOrchestrator, NodeTest, ModeBlocking},
+		{NodeOrchestrator, NodeSecurityScan, ModeBlocking},
+		{NodeOrchestrator, NodeTelemetry, ModeBestEffort},
+		{NodeBuild, NodeArtifactStore, ModeBlocking},
+		{NodeBuild, NodeRegistry, ModeGated},
+		{NodeTest, NodeArtifactStore, ModeBlocking},
+		{NodeSecurityScan, NodeSAST, ModeGated},
+		{NodeTelemetry, NodeKafka, ModeBlocking},
 	}
 }
 
@@ -140,6 +164,9 @@ func validateTopology(nodes []nodeSpec, edges []edgeSpec) error {
 		if to.Tier <= from.Tier {
 			return fmt.Errorf("sim: edge %s(tier %d)->%s(tier %d) does not descend a tier",
 				e.From, from.Tier, e.To, to.Tier)
+		}
+		if e.Mode == ModeGated && to.GateHoldBudget <= 0 {
+			return fmt.Errorf("sim: edge %s->%s is ModeGated but target %q has no gate config", e.From, e.To, e.To)
 		}
 	}
 

@@ -285,7 +285,7 @@ func TestRunMetrics(t *testing.T) {
 	}
 
 	for i := 0; i < 100; i++ {
-		r.Record(time.Duration(i+1)*time.Millisecond, i < 90)
+		r.Record(time.Duration(i+1)*time.Millisecond, i < 90, false)
 	}
 	v := r.Read(c.Now())
 	if v.RunsPerSec != 20 {
@@ -301,6 +301,38 @@ func TestRunMetrics(t *testing.T) {
 	c.Advance(10 * time.Second)
 	if v := r.Read(c.Now()); v.RunsPerSec != 0 {
 		t.Fatalf("stale run samples survived pruning: %+v", v)
+	}
+}
+
+// TestRunMetricsPrioritySplit is the measured signal the release-gate story
+// depends on: SuccessRateRC and SuccessRateNormal must be independent of each
+// other, and default to 1 (not 0) for a class with no samples yet so an
+// early, thin window never flashes a false failure.
+func TestRunMetricsPrioritySplit(t *testing.T) {
+	t.Parallel()
+
+	c := newFakeClock()
+	r := newRunMetrics(5 * time.Second)
+	r.now = c.Now
+
+	if v := r.Read(c.Now()); v.SuccessRateRC != 1 || v.SuccessRateNormal != 1 {
+		t.Fatalf("empty run metrics = %+v, want both priority success rates defaulted to 1", v)
+	}
+
+	// 10 RC runs, all succeed. 10 Normal runs, all fail.
+	for i := 0; i < 10; i++ {
+		r.Record(time.Millisecond, true, true)
+		r.Record(time.Millisecond, false, false)
+	}
+	v := r.Read(c.Now())
+	if v.SuccessRateRC != 1 {
+		t.Errorf("SuccessRateRC = %v, want 1 (all RC runs succeeded)", v.SuccessRateRC)
+	}
+	if v.SuccessRateNormal != 0 {
+		t.Errorf("SuccessRateNormal = %v, want 0 (all Normal runs failed)", v.SuccessRateNormal)
+	}
+	if v.SuccessRate != 0.5 {
+		t.Errorf("SuccessRate = %v, want 0.5 (blended)", v.SuccessRate)
 	}
 }
 

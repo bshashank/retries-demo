@@ -1,8 +1,14 @@
 import { memo, useCallback, useState } from 'react'
-import type { EdgeSnapshot, ScenarioInfo } from '../types'
+import type { DependencyMode, EdgeSnapshot, ScenarioInfo } from '../types'
 import type { SimApi } from '../lib/api'
 import { formatMultiplier } from '../lib/format'
 import './ControlPanel.css'
+
+const MODE_LABEL: Record<DependencyMode, string> = {
+  blocking: 'Blocking',
+  best_effort: 'Best Effort',
+  gated: 'Gated',
+}
 
 export interface NodeOption {
   id: string
@@ -172,11 +178,15 @@ function ControlPanelBase({
 
           <div className="controls__edge-legend">
             <div className="controls__edge-legend-item">
-              <span className="controls__edge-legend-tag controls__edge-legend-tag--ess mono">ESSENTIAL (Solid)</span>
+              <span className="controls__edge-legend-tag controls__edge-legend-tag--ess mono">BLOCKING (Solid)</span>
               <span>Full deadline pass-through. Child failure escalates to <strong>FAILING</strong>.</span>
             </div>
             <div className="controls__edge-legend-item">
-              <span className="controls__edge-legend-tag controls__edge-legend-tag--opt mono">OPTIONAL (Dashed)</span>
+              <span className="controls__edge-legend-tag controls__edge-legend-tag--gated mono">GATED (Dash-dot)</span>
+              <span>Bounded hold queue. Escalates to <strong>FAILING</strong> only once it saturates and starts shedding Normal-priority runs.</span>
+            </div>
+            <div className="controls__edge-legend-item">
+              <span className="controls__edge-legend-tag controls__edge-legend-tag--opt mono">BEST EFFORT (Dashed)</span>
               <span>300ms timeout boundary. Failure is contained at <strong>DEGRADED</strong>.</span>
             </div>
           </div>
@@ -184,8 +194,11 @@ function ControlPanelBase({
           <ul className="controls__edges">
             {edges.map((edge) => {
               const key = `${edge.from}->${edge.to}`
+              const modes: DependencyMode[] = edge.supportsGated
+                ? ['blocking', 'gated', 'best_effort']
+                : ['blocking', 'best_effort']
               return (
-                <li className="edge-row" key={key} data-essential={edge.essential ? 'true' : 'false'}>
+                <li className="edge-row" key={key} data-mode={edge.mode}>
                   <span className="edge-row__names mono" title={`timeout ${Math.round(edge.timeoutMs)}ms`}>
                     <span className="edge-row__from">{edge.from}</span>
                     <span className="edge-row__arrow" aria-hidden="true">
@@ -199,26 +212,19 @@ function ControlPanelBase({
                     role="group"
                     aria-label={`${edge.from} to ${edge.to} classification`}
                   >
-                    <button
-                      type="button"
-                      data-active={edge.essential ? 'true' : undefined}
-                      disabled={pending !== null || edge.essential}
-                      onClick={() =>
-                        void run(`${key}-ess`, () => api.setEdgeEssential(edge.from, edge.to, true))
-                      }
-                    >
-                      Essential
-                    </button>
-                    <button
-                      type="button"
-                      data-active={!edge.essential ? 'true' : undefined}
-                      disabled={pending !== null || !edge.essential}
-                      onClick={() =>
-                        void run(`${key}-opt`, () => api.setEdgeEssential(edge.from, edge.to, false))
-                      }
-                    >
-                      Optional
-                    </button>
+                    {modes.map((mode) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        data-active={edge.mode === mode ? 'true' : undefined}
+                        disabled={pending !== null || edge.mode === mode}
+                        onClick={() =>
+                          void run(`${key}-${mode}`, () => api.setEdgeMode(edge.from, edge.to, mode))
+                        }
+                      >
+                        {MODE_LABEL[mode]}
+                      </button>
+                    ))}
                   </span>
                 </li>
               )

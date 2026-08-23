@@ -210,7 +210,7 @@ func TestNonEssentialDependencyIsBoundedAndNonFatal(t *testing.T) {
 	})
 
 	dep := &dependency{from: "parent", to: "child", child: child, timeout: nonEssentialTimeout}
-	dep.essential.Store(false)
+	dep.mode.Store(ModeBestEffort)
 	parent.deps = append(parent.deps, dep)
 
 	parent.start()
@@ -252,7 +252,7 @@ func TestEssentialDependencyIsAdditiveAndFatal(t *testing.T) {
 	})
 
 	dep := &dependency{from: "parent", to: "child", child: child, timeout: nonEssentialTimeout}
-	dep.essential.Store(true)
+	dep.mode.Store(ModeBlocking)
 	parent.deps = append(parent.deps, dep)
 
 	parent.start()
@@ -294,7 +294,7 @@ func TestEssentialToggleIsReadOncePerCall(t *testing.T) {
 		BaseLatency: 5 * time.Millisecond, Workers: 8, QueueCap: 64,
 	})
 	dep := &dependency{from: "parent", to: "child", child: child, timeout: nonEssentialTimeout}
-	dep.essential.Store(false)
+	dep.mode.Store(ModeBestEffort)
 	parent.deps = append(parent.deps, dep)
 	child.failRate.Store(1.0)
 
@@ -321,7 +321,11 @@ func TestEssentialToggleIsReadOncePerCall(t *testing.T) {
 			default:
 			}
 			v = !v
-			dep.essential.Store(v)
+			if v {
+				dep.mode.Store(ModeBlocking)
+			} else {
+				dep.mode.Store(ModeBestEffort)
+			}
 			time.Sleep(time.Millisecond)
 		}
 	}()
@@ -355,6 +359,52 @@ func TestServiceQueueAccessors(t *testing.T) {
 	}
 	if s.queueDepth() != 0 {
 		t.Fatalf("queueDepth = %d, want 0", s.queueDepth())
+	}
+}
+
+// TestGateAdmitCheckHasHysteresis is the fix for a real bug: a bare
+// occupancy >= gateAdmitFraction check bounces open and shut every tick once
+// a live queue length hovers near the boundary (shed a bit -> drain under
+// the line -> stop shedding -> refill over the line -> shed again), which
+// showed up as a node's own health flickering on and off in the UI. The
+// latch must only release once occupancy has drained well below the
+// threshold that set it, not the instant it dips under 90% again.
+func TestGateAdmitCheckHasHysteresis(t *testing.T) {
+	t.Parallel()
+
+	// Capacity 10 so gateAdmitFraction (0.9) and gateResumeFraction (0.3, tied
+	// to gateDegradedFraction) land on clean integers: shed at depth 9, resume
+	// at depth 3.
+	s := newService(nodeSpec{ID: "gate", Label: "Gate", Tier: 3, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 10})
+	fill := func(n int) {
+		for i := 0; i < n; i++ {
+			s.queue <- &job{Ctx: context.Background(), EnqueuedAt: time.Now(), Done: make(chan Result, 1)}
+		}
+	}
+	drainTo := func(n int) {
+		for s.queueDepth() > n {
+			<-s.queue
+		}
+	}
+
+	fill(8) // 80%: below the shed threshold.
+	if s.admitCheck() {
+		t.Fatalf("admitCheck() at depth 8/10 = true, want false (below gateAdmitFraction)")
+	}
+
+	fill(1) // 90%: crosses the shed threshold.
+	if !s.admitCheck() {
+		t.Fatalf("admitCheck() at depth 9/10 = false, want true (at gateAdmitFraction)")
+	}
+
+	drainTo(4) // 40%: back under 90%, but still above gateResumeFraction.
+	if !s.admitCheck() {
+		t.Fatalf("admitCheck() at depth 4/10 = false, want true — hysteresis must hold the latch until gateResumeFraction, not release the instant occupancy dips under gateAdmitFraction")
+	}
+
+	drainTo(3) // 30%: at gateResumeFraction, the latch releases.
+	if s.admitCheck() {
+		t.Fatalf("admitCheck() at depth 3/10 = true, want false (at gateResumeFraction, latch should release)")
 	}
 }
 

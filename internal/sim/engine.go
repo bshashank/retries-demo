@@ -102,13 +102,13 @@ func NewWithContext(parent context.Context) (*Engine, error) {
 	}
 	for _, spec := range edges {
 		dep := &dependency{
-			from:             spec.From,
-			to:               spec.To,
-			child:            e.services[spec.To],
-			defaultEssential: spec.Essential,
-			timeout:          nonEssentialTimeout,
+			from:        spec.From,
+			to:          spec.To,
+			child:       e.services[spec.To],
+			defaultMode: spec.Mode,
+			timeout:     nonEssentialTimeout,
 		}
-		dep.essential.Store(spec.Essential)
+		dep.mode.Store(spec.Mode)
 		parentSvc := e.services[spec.From]
 		parentSvc.deps = append(parentSvc.deps, dep)
 		e.edges = append(e.edges, dep)
@@ -180,12 +180,14 @@ func (e *Engine) generateLoad() {
 		e.runWG.Add(1)
 		go func() {
 			defer e.runWG.Done()
+			priority := pickPriority()
 			runCtx, cancel := context.WithTimeout(e.ctx, runDeadline)
+			runCtx = withPriority(runCtx, priority)
 			defer cancel()
 
 			start := time.Now()
 			res := e.root.call(runCtx)
-			e.runs.Record(time.Since(start), res.Err == nil)
+			e.runs.Record(time.Since(start), res.Err == nil, priority == PriorityReleaseCandidate)
 		}()
 	}
 }
@@ -227,15 +229,31 @@ func (e *Engine) tick() {
 	views := make(map[string]metricsView, len(e.ordered))
 	local := make(map[string]Status, len(e.ordered))
 	deps := make(map[string][]rollupDep, len(e.ordered))
+	// Captured once per node so the status computed below and the QueueDepth
+	// published in the snapshot always describe the exact same instant — two
+	// separate live reads of a channel under concurrent load can disagree by
+	// the time the second one runs.
+	depths := make(map[string]int, len(e.ordered))
 
 	for _, s := range e.ordered {
 		v := s.metrics.Read(now)
 		views[s.id] = v
-		local[s.id] = localStatus(v)
+		depth := s.queueDepth()
+		depths[s.id] = depth
+		if s.gateHoldBudget > 0 {
+			// Gated nodes tolerate long queue waits by design, so the
+			// wait-time thresholds below don't apply to them - only
+			// error/reject/abandon rates do, plus backlog occupancy.
+			gv := v
+			gv.MeanQueueWaitMs = 0
+			local[s.id] = worseStatus(localStatus(gv), gateOccupancyStatus(depth, s.queueCapacity(), s.isShedding()))
+		} else {
+			local[s.id] = localStatus(v)
+		}
 
 		ds := make([]rollupDep, 0, len(s.deps))
 		for _, d := range s.deps {
-			ds = append(ds, rollupDep{To: d.to, Essential: d.essential.Load()})
+			ds = append(ds, rollupDep{To: d.to, Essential: modeEssential(d.mode.Load())})
 		}
 		deps[s.id] = ds
 	}
@@ -251,7 +269,7 @@ func (e *Engine) tick() {
 			Tier:              s.tier,
 			LocalStatus:       local[s.id],
 			RollupStatus:      rollups[s.id],
-			QueueDepth:        s.queueDepth(),
+			QueueDepth:        depths[s.id],
 			QueueCapacity:     s.queueCapacity(),
 			InFlight:          int(s.inFlight.Load()),
 			Workers:           s.workerCount,
@@ -271,10 +289,11 @@ func (e *Engine) tick() {
 	edges := make([]EdgeSnapshot, 0, len(e.edges))
 	for _, d := range e.edges {
 		edges = append(edges, EdgeSnapshot{
-			From:      d.from,
-			To:        d.to,
-			Essential: d.essential.Load(),
-			TimeoutMs: float64(d.timeout) / float64(time.Millisecond),
+			From:          d.from,
+			To:            d.to,
+			Mode:          d.mode.Load(),
+			SupportsGated: e.services[d.to].gateHoldBudget > 0,
+			TimeoutMs:     float64(d.timeout) / float64(time.Millisecond),
 		})
 	}
 
@@ -299,14 +318,16 @@ func (e *Engine) tick() {
 	rv := e.runs.Read(now)
 
 	snap := Snapshot{
-		AtMs:           now.UnixMilli(),
-		Global:         global,
-		RunsPerSec:     round2(rv.RunsPerSec),
-		RunSuccessRate: round4(rv.SuccessRate),
-		RunP95Ms:       round2(rv.P95Ms),
-		Nodes:          nodes,
-		Edges:          edges,
-		Events:         e.eventsCopy(),
+		AtMs:                 now.UnixMilli(),
+		Global:               global,
+		RunsPerSec:           round2(rv.RunsPerSec),
+		RunSuccessRate:       round4(rv.SuccessRate),
+		RunP95Ms:             round2(rv.P95Ms),
+		RunSuccessRateRC:     round4(rv.SuccessRateRC),
+		RunSuccessRateNormal: round4(rv.SuccessRateNormal),
+		Nodes:                nodes,
+		Edges:                edges,
+		Events:               e.eventsCopy(),
 	}
 
 	e.snapMu.Lock()
@@ -345,24 +366,29 @@ func (e *Engine) Inject(nodeID string, latencyMultiplier, failRate float64) erro
 	return nil
 }
 
-// SetEdgeEssential reclassifies a dependency at runtime. The change is picked up
+// SetEdgeMode reclassifies a dependency at runtime. The change is picked up
 // by the next call into the parent; calls already in flight keep the
-// classification they started with.
-func (e *Engine) SetEdgeEssential(from, to string, essential bool) error {
+// classification they started with. ModeGated is rejected for an edge whose
+// target has no gate config, for the same reason validateTopology rejects it
+// statically.
+func (e *Engine) SetEdgeMode(from, to string, mode DependencyMode) error {
+	if mode != ModeBlocking && mode != ModeBestEffort && mode != ModeGated {
+		return fmt.Errorf("sim: unknown mode %q", mode)
+	}
 	for _, d := range e.edges {
-		if d.from == from && d.to == to {
-			if d.essential.Load() == essential {
-				return nil
-			}
-			d.essential.Store(essential)
-			kind := "non-essential"
-			if essential {
-				kind = "essential"
-			}
-			e.emit(LevelInfo, fmt.Sprintf("edge %s -> %s reclassified as %s", from, to, kind))
-			e.kick()
+		if d.from != from || d.to != to {
+			continue
+		}
+		if mode == ModeGated && e.services[d.to].gateHoldBudget <= 0 {
+			return fmt.Errorf("sim: edge %s -> %s cannot be ModeGated: %s has no gate config", from, to, to)
+		}
+		if d.mode.Load() == mode {
 			return nil
 		}
+		d.mode.Store(mode)
+		e.emit(LevelInfo, fmt.Sprintf("edge %s -> %s reclassified as %s", from, to, mode))
+		e.kick()
+		return nil
 	}
 	return fmt.Errorf("sim: unknown edge %q -> %q", from, to)
 }
@@ -382,9 +408,10 @@ func (e *Engine) reset() {
 	for _, s := range e.ordered {
 		s.latencyMultiplier.Store(1)
 		s.failRate.Store(0)
+		s.shedding.Store(false)
 	}
 	for _, d := range e.edges {
-		d.essential.Store(d.defaultEssential)
+		d.mode.Store(d.defaultMode)
 	}
 }
 

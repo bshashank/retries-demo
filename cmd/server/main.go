@@ -55,15 +55,22 @@ func main() {
 	})
 
 	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		Addr:        addr,
+		Handler:     handler,
+		BaseContext: func(net.Listener) context.Context { return baseCtx },
+		// ReadTimeout bounds reading the request line, headers, AND body from
+		// connection accept. It's safe alongside a zero WriteTimeout because it
+		// only ever governs the read side: a POST trickling its (already
+		// 8KiB-capped) body in slowly gets cut off here instead of holding a
+		// request slot open indefinitely, while GET /api/stream has no body to
+		// read, so this never touches the SSE response that follows.
+		ReadTimeout:       15 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// WriteTimeout MUST stay zero. It is an absolute deadline on the whole
 		// response, not an idle timeout, so any non-zero value silently severs
-		// every SSE stream at that mark. ReadHeaderTimeout covers the slowloris
-		// risk that WriteTimeout is usually reached for.
+		// every SSE stream at that mark. ReadTimeout/ReadHeaderTimeout cover the
+		// slowloris risk that WriteTimeout is usually reached for.
 		WriteTimeout: 0,
 		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
 	}

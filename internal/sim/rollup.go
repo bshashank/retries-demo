@@ -124,6 +124,60 @@ func computeRollups(evalOrder []string, local map[string]Status, deps map[string
 	return out
 }
 
+// worseStatus returns whichever of a, b is the more severe.
+func worseStatus(a, b Status) Status {
+	sev := func(s Status) int {
+		switch s {
+		case StatusFailing:
+			return 2
+		case StatusDegraded:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if sev(b) > sev(a) {
+		return b
+	}
+	return a
+}
+
+// gateDegradedFraction is the occupancy fraction at which a gated node's
+// backlog is worth calling out as DEGRADED, even though it's nowhere near
+// shedding yet.
+const gateDegradedFraction = 0.3
+
+// gateOccupancyStatus derives a gated node's local status from backlog
+// occupancy (queue depth over capacity) instead of wait-time, with FAILING
+// keyed to the service's own hysteresis-latched shedding state rather than a
+// second, independent occupancy threshold.
+//
+// A gated node is deliberately designed to tolerate long queue waits (up to
+// its gateHoldBudget) — that patience is the entire mechanism. Reusing
+// localStatus's wait-time thresholds unmodified would fire FAILING within
+// seconds of any slowdown, long before the backlog is anywhere near
+// saturated and long before shedding actually starts, which would make the
+// "FAILING banner + protected RC traffic" story false. Occupancy is what
+// actually corresponds to "the hold queue is full" in the demo's own
+// language. FAILING specifically reads the live shedding bool (not a raw
+// fraction >= gateAdmitFraction check here) so "the banner reads FAILING"
+// and "shedding is actually happening" can never read differently at the
+// same instant, and so the pair share one debounced signal instead of
+// flickering independently right at the boundary.
+func gateOccupancyStatus(depth, capacity int, shedding bool) Status {
+	if shedding {
+		return StatusFailing
+	}
+	if capacity <= 0 {
+		return StatusOK
+	}
+	frac := float64(depth) / float64(capacity)
+	if frac >= gateDegradedFraction {
+		return StatusDegraded
+	}
+	return StatusOK
+}
+
 // levelFor maps a status to the UI severity used for transition events.
 func levelFor(s Status) EventLevel {
 	switch s {

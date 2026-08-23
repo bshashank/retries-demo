@@ -66,21 +66,21 @@ func TestTopologyShape(t *testing.T) {
 func TestTopologyEdges(t *testing.T) {
 	t.Parallel()
 
-	want := map[[2]string]bool{ // edge -> essential by default
-		{NodeOrchestrator, NodeBuild}:        true,
-		{NodeOrchestrator, NodeTest}:         true,
-		{NodeOrchestrator, NodeSecurityScan}: false,
-		{NodeOrchestrator, NodeTelemetry}:    false,
-		{NodeBuild, NodeArtifactStore}:       true,
-		{NodeBuild, NodeRegistry}:            false,
-		{NodeTest, NodeArtifactStore}:        true,
-		{NodeSecurityScan, NodeSAST}:         true,
-		{NodeTelemetry, NodeKafka}:           true,
+	want := map[[2]string]DependencyMode{
+		{NodeOrchestrator, NodeBuild}:        ModeBlocking,
+		{NodeOrchestrator, NodeTest}:         ModeBlocking,
+		{NodeOrchestrator, NodeSecurityScan}: ModeBlocking, // the actual bug fix: was ModeBestEffort
+		{NodeOrchestrator, NodeTelemetry}:    ModeBestEffort,
+		{NodeBuild, NodeArtifactStore}:       ModeBlocking,
+		{NodeBuild, NodeRegistry}:            ModeGated, // was ModeBestEffort
+		{NodeTest, NodeArtifactStore}:        ModeBlocking,
+		{NodeSecurityScan, NodeSAST}:         ModeGated, // was ModeBlocking
+		{NodeTelemetry, NodeKafka}:           ModeBlocking,
 	}
 
-	got := map[[2]string]bool{}
+	got := map[[2]string]DependencyMode{}
 	for _, e := range edgeSpecs() {
-		got[[2]string{e.From, e.To}] = e.Essential
+		got[[2]string{e.From, e.To}] = e.Mode
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d distinct edges, want %d", len(got), len(want))
@@ -92,7 +92,7 @@ func TestTopologyEdges(t *testing.T) {
 			continue
 		}
 		if gv != v {
-			t.Errorf("edge %s->%s essential = %v, want %v", k[0], k[1], gv, v)
+			t.Errorf("edge %s->%s mode = %v, want %v", k[0], k[1], gv, v)
 		}
 	}
 }
@@ -107,7 +107,7 @@ func TestArtifactStoreHasTwoEssentialParents(t *testing.T) {
 		if e.To != NodeArtifactStore {
 			continue
 		}
-		if !e.Essential {
+		if !modeEssential(e.Mode) {
 			t.Errorf("edge %s->artifact-store should default to essential", e.From)
 		}
 		parents = append(parents, e.From)
@@ -132,9 +132,9 @@ func TestValidateTopologyRejectsBadGraphs(t *testing.T) {
 	t.Parallel()
 
 	base := []nodeSpec{
-		{"a", "A", 1, time.Millisecond, 1, 1},
-		{"b", "B", 2, time.Millisecond, 1, 1},
-		{"c", "C", 3, time.Millisecond, 1, 1},
+		{ID: "a", Label: "A", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
+		{ID: "b", Label: "B", Tier: 2, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
+		{ID: "c", Label: "C", Tier: 3, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
 	}
 
 	tests := []struct {
@@ -145,22 +145,22 @@ func TestValidateTopologyRejectsBadGraphs(t *testing.T) {
 		{
 			name:  "unknown edge target",
 			nodes: base,
-			edges: []edgeSpec{{"a", "nope", true}},
+			edges: []edgeSpec{{"a", "nope", ModeBlocking}},
 		},
 		{
 			name:  "unknown edge source",
 			nodes: base,
-			edges: []edgeSpec{{"nope", "b", true}},
+			edges: []edgeSpec{{"nope", "b", ModeBlocking}},
 		},
 		{
 			name:  "self edge",
 			nodes: base,
-			edges: []edgeSpec{{"a", "a", true}},
+			edges: []edgeSpec{{"a", "a", ModeBlocking}},
 		},
 		{
 			name:  "duplicate edge",
 			nodes: base,
-			edges: []edgeSpec{{"a", "b", true}, {"a", "b", false}},
+			edges: []edgeSpec{{"a", "b", ModeBlocking}, {"a", "b", ModeBestEffort}},
 		},
 		{
 			name:  "duplicate node",
@@ -170,25 +170,30 @@ func TestValidateTopologyRejectsBadGraphs(t *testing.T) {
 		{
 			name:  "edge climbs a tier",
 			nodes: base,
-			edges: []edgeSpec{{"c", "a", true}},
+			edges: []edgeSpec{{"c", "a", ModeBlocking}},
 		},
 		{
 			name: "cycle",
 			nodes: []nodeSpec{
-				{"a", "A", 1, time.Millisecond, 1, 1},
-				{"b", "B", 1, time.Millisecond, 1, 1},
+				{ID: "a", Label: "A", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
+				{ID: "b", Label: "B", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
 			},
-			edges: []edgeSpec{{"a", "b", true}, {"b", "a", true}},
+			edges: []edgeSpec{{"a", "b", ModeBlocking}, {"b", "a", ModeBlocking}},
 		},
 		{
 			name:  "zero workers",
-			nodes: []nodeSpec{{"a", "A", 1, time.Millisecond, 0, 1}},
+			nodes: []nodeSpec{{ID: "a", Label: "A", Tier: 1, BaseLatency: time.Millisecond, Workers: 0, QueueCap: 1}},
 			edges: nil,
 		},
 		{
 			name:  "zero queue capacity",
-			nodes: []nodeSpec{{"a", "A", 1, time.Millisecond, 1, 0}},
+			nodes: []nodeSpec{{ID: "a", Label: "A", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 0}},
 			edges: nil,
+		},
+		{
+			name:  "gated edge on a non-gate node",
+			nodes: base,
+			edges: []edgeSpec{{"a", "b", ModeGated}},
 		},
 	}
 
@@ -244,11 +249,11 @@ func TestTopoOrderIsParentsFirst(t *testing.T) {
 func TestTopoOrderDetectsCycle(t *testing.T) {
 	t.Parallel()
 	nodes := []nodeSpec{
-		{"a", "A", 1, time.Millisecond, 1, 1},
-		{"b", "B", 1, time.Millisecond, 1, 1},
-		{"c", "C", 1, time.Millisecond, 1, 1},
+		{ID: "a", Label: "A", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
+		{ID: "b", Label: "B", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
+		{ID: "c", Label: "C", Tier: 1, BaseLatency: time.Millisecond, Workers: 1, QueueCap: 1},
 	}
-	edges := []edgeSpec{{"a", "b", true}, {"b", "c", true}, {"c", "a", true}}
+	edges := []edgeSpec{{"a", "b", ModeBlocking}, {"b", "c", ModeBlocking}, {"c", "a", ModeBlocking}}
 	if _, err := topoOrder(nodes, edges); err == nil {
 		t.Fatal("topoOrder accepted a cycle")
 	}

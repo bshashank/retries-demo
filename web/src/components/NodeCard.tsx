@@ -152,7 +152,7 @@ function NodeCardBase({
         {diverges ? (
           <span className="node-card__derivation-text">
             <span className="node-card__local" data-status={local.tone}>
-              local {local.label}
+              own health: {local.label}
             </span>
             <span aria-hidden="true"> → </span>
             <span>

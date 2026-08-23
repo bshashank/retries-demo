@@ -139,6 +139,10 @@
   border-left: 3px solid var(--status-degraded);
 }
 
+.diagnostic-card__chain-item[data-chain-type="gated_hold"] {
+  border-left: 3px solid #6b93c0;
+}
+
 .diagnostic-card__chain-header {
   display: flex;
   align-items: center;
@@ -196,4 +200,14 @@
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+.diagnostic-card__contrast[data-variant="gated"] {
+  border: 1px dashed #6b93c0;
+}
+
+.diagnostic-card__contrast[data-variant="gated"] .diagnostic-card__contrast-tag {
+  background: rgba(107, 147, 192, 0.15);
+  color: #6b93c0;
+  border-color: #6b93c0;
 }

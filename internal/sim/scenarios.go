@@ -6,6 +6,7 @@ import "fmt"
 const (
 	ScenarioNominal        = "nominal"
 	ScenarioSASTSlow       = "sast-slow"
+	ScenarioRegistrySlow   = "registry-slow"
 	ScenarioArtifactOutage = "artifact-outage"
 	ScenarioKafkaLag       = "kafka-lag"
 )
@@ -22,20 +23,26 @@ var scenarioDefs = []ScenarioInfo{
 	{
 		Name:        ScenarioSASTSlow,
 		Label:       "SAST Engine Slowdown (10x)",
-		Description: "The SAST engine takes 10x its normal 60ms. Security Scan depends on it essentially, but the orchestrator treats Security Scan as non-essential with a 300ms budget.",
-		Expected:    "SAST Engine and Security Scan both go red. Global health settles at DEGRADED and stays there - it must never reach FAILING. The containment proof is on the orchestrator: its queue depth and mean queue wait stay at baseline, because the 300ms timeout caps what a non-essential branch can cost it.",
+		Description: "The SAST engine takes 10x its normal 60ms. A pipeline that can't get a SAST result can't ship, so Security Scan calls it through a gate: fast when healthy, held in a bounded backlog when slow, shed only if that backlog itself saturates.",
+		Expected:    "SAST Engine goes red quickly and Security Scan follows it. Global health settles at DEGRADED first - the orchestrator's own queue and mean queue wait stay at baseline, because the gate's grace window bounds what a slow SAST can cost it. Left running long enough for the backlog to saturate, global health escalates to FAILING - but check runSuccessRateRC vs runSuccessRateNormal: only Normal-priority runs get shed at a saturated gate, so release-candidate traffic keeps succeeding even while the banner reads red.",
+	},
+	{
+		Name:        ScenarioRegistrySlow,
+		Label:       "Container Registry Slowdown (10x)",
+		Description: "The container registry takes 10x its normal 30ms. CD can't deploy an image that never reached the registry, so Build calls it through the same gated pattern as SAST - the second, independent path to a real FAILING.",
+		Expected:    "Container Registry goes red, Build follows it, and the story is identical to the SAST scenario on a different branch of the graph: DEGRADED while the gate has headroom, escalating to FAILING if left running, with runSuccessRateRC staying well above runSuccessRateNormal once shedding starts.",
 	},
 	{
 		Name:        ScenarioArtifactOutage,
 		Label:       "Artifact Store Outage (10x)",
 		Description: "The artifact store takes 10x its normal 25ms. It is the shared leaf: build and test both depend on it essentially, so it absorbs their combined ~40 req/sec through one queue.",
-		Expected:    "Artifact Store saturates (offered load ~40/sec against ~32/sec of capacity), its queue climbs and starts shedding. Build and test block on it, so both back up too, and global health reaches FAILING within roughly 10-20 seconds. This is the escalation path a non-essential failure cannot take.",
+		Expected:    "Artifact Store saturates (offered load ~40/sec against ~32/sec of capacity), its queue climbs and starts shedding. Build and test block on it, so both back up too, and global health reaches FAILING within roughly 10-20 seconds - fast, because this path has no gate to absorb the slowdown first.",
 	},
 	{
 		Name:        ScenarioKafkaLag,
 		Label:       "Kafka Bus Lag (5x)",
-		Description: "The Kafka event bus takes 5x its normal 25ms, pushing its 2 consumers past saturation. Telemetry depends on it essentially; the orchestrator treats telemetry as non-essential.",
-		Expected:    "Kafka's queue grows monotonically until the 300ms non-essential budget starts abandoning queued work, then holds at that ceiling with mean queue wait pinned near 300ms. Telemetry degrades and goes red. Global health is DEGRADED, and again the orchestrator's own queue does not move.",
+		Description: "The Kafka event bus takes 5x its normal 25ms, pushing its 2 consumers past saturation. Telemetry depends on it essentially; the orchestrator treats telemetry as best-effort.",
+		Expected:    "Kafka's queue grows monotonically until the 300ms best-effort budget starts abandoning queued work, then holds at that ceiling with mean queue wait pinned near 300ms. Telemetry degrades and goes red. Global health is DEGRADED, and again the orchestrator's own queue does not move.",
 	},
 }
 
@@ -61,6 +68,8 @@ func (e *Engine) ApplyScenario(name string) error {
 	case ScenarioNominal:
 	case ScenarioSASTSlow:
 		target, mult = NodeSAST, 10
+	case ScenarioRegistrySlow:
+		target, mult = NodeRegistry, 10
 	case ScenarioArtifactOutage:
 		target, mult = NodeArtifactStore, 10
 	case ScenarioKafkaLag:

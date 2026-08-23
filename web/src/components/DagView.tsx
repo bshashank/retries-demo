@@ -66,7 +66,21 @@ function DagViewBase({ nodes, edges, insights, selectedNodeId, onSelectNode }: D
               <line x1="1" y1="5" x2="21" y2="5" className="dag__legend-line" />
               <circle cx="25" cy="5" r="3.5" className="dag__legend-dot" />
             </svg>
-            Essential — failure propagates
+            Blocking — failure propagates
+          </span>
+          <span className="dag__legend-item">
+            <svg width="30" height="10" aria-hidden="true">
+              <line
+                x1="1"
+                y1="5"
+                x2="21"
+                y2="5"
+                className="dag__legend-line"
+                strokeDasharray="6 2 1 2"
+              />
+              <circle cx="25" cy="5" r="3.5" className="dag__legend-dot" />
+            </svg>
+            Gated — held, then shed if saturated
           </span>
           <span className="dag__legend-item">
             <svg width="30" height="10" aria-hidden="true">
@@ -80,7 +94,7 @@ function DagViewBase({ nodes, edges, insights, selectedNodeId, onSelectNode }: D
               />
               <circle cx="25" cy="5" r="3.5" className="dag__legend-dot dag__legend-dot--hollow" />
             </svg>
-            Non-essential — failure contained
+            Best effort — failure contained
           </span>
         </div>
       </header>
@@ -125,30 +139,47 @@ function DagViewBase({ nodes, edges, insights, selectedNodeId, onSelectNode }: D
             const childIsHurting = childStatus !== 'OK'
             const contained =
               childIsHurting &&
-              !edge.essential &&
+              edge.mode === 'best_effort' &&
               statusSeverity(childStatus) > statusSeverity(parentStatus)
             const propagating =
               childIsHurting &&
-              edge.essential &&
+              edge.mode === 'blocking' &&
               statusSeverity(parentStatus) >= statusSeverity(childStatus)
-            const annotation = contained ? 'CONTAINED' : propagating ? 'PROPAGATING' : null
+            const held = childIsHurting && edge.mode === 'gated'
+            const annotation = contained
+              ? 'CONTAINED'
+              : propagating
+                ? 'PROPAGATING'
+                : held
+                  ? 'HELD'
+                  : null
+            const annotationTag = contained ? 'contained' : propagating ? 'propagating' : 'held'
             const annotationWidth = annotation ? annotation.length * 5.4 + 12 : 0
+            const modeClass =
+              edge.mode === 'gated'
+                ? 'dag__edge--gated'
+                : edge.mode === 'blocking'
+                  ? 'dag__edge--essential'
+                  : 'dag__edge--optional'
+            const markerClass = edge.mode === 'best_effort' ? 'dag__edge-marker--optional' : 'dag__edge-marker--essential'
+            const modeDescription =
+              edge.mode === 'gated' ? 'gated' : edge.mode === 'blocking' ? 'blocking' : 'best-effort'
 
             return (
               <g key={key} data-status={tone}>
                 <path
                   d={g.path}
-                  className={`dag__edge ${edge.essential ? 'dag__edge--essential' : 'dag__edge--optional'}`}
+                  className={`dag__edge ${modeClass}`}
                   markerEnd={`url(#dag-arrow-${tone})`}
                 />
                 <circle
                   cx={g.midX}
                   cy={g.midY}
                   r={4}
-                  className={`dag__edge-marker ${edge.essential ? 'dag__edge-marker--essential' : 'dag__edge-marker--optional'}`}
+                  className={`dag__edge-marker ${markerClass}`}
                 />
                 {annotation && (
-                  <g className={`dag__edge-tag dag__edge-tag--${contained ? 'contained' : 'propagating'}`}>
+                  <g className={`dag__edge-tag dag__edge-tag--${annotationTag}`}>
                     <rect
                       x={g.midX + 8}
                       y={g.midY - 7.5}
@@ -164,7 +195,7 @@ function DagViewBase({ nodes, edges, insights, selectedNodeId, onSelectNode }: D
                 <title>
                   {`${nodeById.get(edge.from)?.label ?? edge.from} depends on ${
                     nodeById.get(edge.to)?.label ?? edge.to
-                  } — ${edge.essential ? 'essential' : 'non-essential'}, timeout ${Math.round(edge.timeoutMs)}ms`}
+                  } — ${modeDescription}, timeout ${Math.round(edge.timeoutMs)}ms`}
                 </title>
               </g>
             )

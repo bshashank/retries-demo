@@ -67,9 +67,9 @@ func (a *API) handleInject(w http.ResponseWriter, r *http.Request) {
 }
 
 type edgeRequest struct {
-	From      string `json:"from"`
-	To        string `json:"to"`
-	Essential bool   `json:"essential"`
+	From string             `json:"from"`
+	To   string             `json:"to"`
+	Mode sim.DependencyMode `json:"mode"`
 }
 
 func (a *API) handleEdge(w http.ResponseWriter, r *http.Request) {
@@ -86,8 +86,12 @@ func (a *API) handleEdge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "to is required")
 		return
 	}
+	if req.Mode == "" {
+		writeError(w, http.StatusBadRequest, "mode is required")
+		return
+	}
 
-	if err := a.ctrl.SetEdgeEssential(req.From, req.To, req.Essential); err != nil {
+	if err := a.ctrl.SetEdgeMode(req.From, req.To, req.Mode); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
